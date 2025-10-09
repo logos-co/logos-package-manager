@@ -7,28 +7,64 @@ set(CMAKE_AUTOMOC ON)
 
 option(LOGOS_PACKAGE_MANAGER_USE_VENDOR "Force use of vendored Logos dependencies" OFF)
 
-set(_parent_liblogos "${CMAKE_SOURCE_DIR}/../logos-liblogos")
-set(_parent_cpp_sdk "${CMAKE_SOURCE_DIR}/../logos-cpp-sdk")
-set(_use_vendor ${LOGOS_PACKAGE_MANAGER_USE_VENDOR})
-if(NOT _use_vendor)
-    if(NOT EXISTS "${_parent_liblogos}/interface.h" OR NOT EXISTS "${_parent_cpp_sdk}/cpp/logos_api.h")
-        set(_use_vendor ON)
+# Allow override from environment or command line
+if(NOT DEFINED LOGOS_LIBLOGOS_ROOT)
+    set(_parent_liblogos "${CMAKE_SOURCE_DIR}/../logos-liblogos")
+    set(_use_vendor ${LOGOS_PACKAGE_MANAGER_USE_VENDOR})
+    if(NOT _use_vendor)
+        if(NOT EXISTS "${_parent_liblogos}/interface.h")
+            set(_use_vendor ON)
+        endif()
+    endif()
+    if(_use_vendor)
+        set(LOGOS_LIBLOGOS_ROOT "${CMAKE_SOURCE_DIR}/vendor/logos-liblogos")
+    else()
+        set(LOGOS_LIBLOGOS_ROOT "${_parent_liblogos}")
     endif()
 endif()
-if(_use_vendor)
-    set(LOGOS_LIBLOGOS_ROOT "${CMAKE_SOURCE_DIR}/vendor/logos-liblogos")
-    set(LOGOS_CPP_SDK_ROOT "${CMAKE_SOURCE_DIR}/vendor/logos-cpp-sdk")
-else()
-    set(LOGOS_LIBLOGOS_ROOT "${_parent_liblogos}")
-    set(LOGOS_CPP_SDK_ROOT "${_parent_cpp_sdk}")
+
+if(NOT DEFINED LOGOS_CPP_SDK_ROOT)
+    set(_parent_cpp_sdk "${CMAKE_SOURCE_DIR}/../logos-cpp-sdk")
+    set(_use_vendor ${LOGOS_PACKAGE_MANAGER_USE_VENDOR})
+    if(NOT _use_vendor)
+        if(NOT EXISTS "${_parent_cpp_sdk}/cpp/logos_api.h")
+            set(_use_vendor ON)
+        endif()
+    endif()
+    if(_use_vendor)
+        set(LOGOS_CPP_SDK_ROOT "${CMAKE_SOURCE_DIR}/vendor/logos-cpp-sdk")
+    else()
+        set(LOGOS_CPP_SDK_ROOT "${_parent_cpp_sdk}")
+    endif()
 endif()
 
-if(NOT EXISTS "${LOGOS_LIBLOGOS_ROOT}/interface.h")
-    message(FATAL_ERROR "logos-liblogos not found. Run git submodule update --init --recursive.")
+# Check if dependencies are available (support both source and installed layouts)
+set(_liblogos_found FALSE)
+if(EXISTS "${LOGOS_LIBLOGOS_ROOT}/interface.h")
+    set(_liblogos_found TRUE)
+    set(_liblogos_is_source TRUE)
+elseif(EXISTS "${LOGOS_LIBLOGOS_ROOT}/include/interface.h")
+    set(_liblogos_found TRUE)
+    set(_liblogos_is_source FALSE)
 endif()
 
-if(NOT EXISTS "${LOGOS_CPP_SDK_ROOT}/cpp/logos_api.h")
-    message(FATAL_ERROR "logos-cpp-sdk not found. Run git submodule update --init --recursive.")
+set(_cpp_sdk_found FALSE)
+if(EXISTS "${LOGOS_CPP_SDK_ROOT}/cpp/logos_api.h")
+    set(_cpp_sdk_found TRUE)
+    set(_cpp_sdk_is_source TRUE)
+elseif(EXISTS "${LOGOS_CPP_SDK_ROOT}/include/logos_api.h")
+    set(_cpp_sdk_found TRUE)
+    set(_cpp_sdk_is_source FALSE)
+endif()
+
+if(NOT _liblogos_found)
+    message(FATAL_ERROR "logos-liblogos not found at ${LOGOS_LIBLOGOS_ROOT}. "
+                        "Set LOGOS_LIBLOGOS_ROOT or run git submodule update --init --recursive.")
+endif()
+
+if(NOT _cpp_sdk_found)
+    message(FATAL_ERROR "logos-cpp-sdk not found at ${LOGOS_CPP_SDK_ROOT}. "
+                        "Set LOGOS_CPP_SDK_ROOT or run git submodule update --init --recursive.")
 endif()
 
 # Root that contains the vendored dependencies (logos-core checkout or script vendor directory)
@@ -46,54 +82,77 @@ endif()
 find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Core RemoteObjects)
 
 # Run Logos C++ generator on metadata before compilation
-set(CPP_GENERATOR_BUILD_DIR "${LOGOS_DEPS_ROOT}/build/cpp-generator")
-set(CPP_GENERATOR "${CPP_GENERATOR_BUILD_DIR}/bin/logos-cpp-generator")
 set(METADATA_JSON "${CMAKE_CURRENT_SOURCE_DIR}/metadata.json")
 set(PLUGINS_OUTPUT_DIR "${CMAKE_BINARY_DIR}/modules")
 
-if(NOT TARGET cpp_generator_build)
-    add_custom_target(cpp_generator_build
-        COMMAND bash "${LOGOS_CPP_SDK_ROOT}/cpp-generator/compile.sh"
+# Try to find the generator binary
+if(_cpp_sdk_is_source)
+    # Source layout: build the generator
+    set(CPP_GENERATOR_BUILD_DIR "${LOGOS_DEPS_ROOT}/build/cpp-generator")
+    set(CPP_GENERATOR "${CPP_GENERATOR_BUILD_DIR}/bin/logos-cpp-generator")
+    
+    if(NOT TARGET cpp_generator_build)
+        add_custom_target(cpp_generator_build
+            COMMAND bash "${LOGOS_CPP_SDK_ROOT}/cpp-generator/compile.sh"
+            WORKING_DIRECTORY "${LOGOS_DEPS_ROOT}"
+            COMMENT "Building logos-cpp-generator via ${LOGOS_CPP_SDK_ROOT}/cpp-generator/compile.sh"
+            VERBATIM
+        )
+    endif()
+    
+    add_custom_target(run_cpp_generator_package_manager
+        COMMAND "${CPP_GENERATOR}" --metadata "${METADATA_JSON}" --module-dir "${PLUGINS_OUTPUT_DIR}"
         WORKING_DIRECTORY "${LOGOS_DEPS_ROOT}"
-        COMMENT "Building logos-cpp-generator via ${LOGOS_CPP_SDK_ROOT}/cpp-generator/compile.sh"
+        COMMENT "Running logos-cpp-generator on ${METADATA_JSON} with module-dir ${PLUGINS_OUTPUT_DIR}"
+        VERBATIM
+    )
+    add_dependencies(run_cpp_generator_package_manager cpp_generator_build)
+else()
+    # Installed layout: use the generator from the install path
+    find_program(CPP_GENERATOR logos-cpp-generator PATHS ${LOGOS_CPP_SDK_ROOT}/bin NO_DEFAULT_PATH REQUIRED)
+    
+    add_custom_target(run_cpp_generator_package_manager
+        COMMAND "${CPP_GENERATOR}" --metadata "${METADATA_JSON}" --module-dir "${PLUGINS_OUTPUT_DIR}"
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+        COMMENT "Running logos-cpp-generator on ${METADATA_JSON} with module-dir ${PLUGINS_OUTPUT_DIR}"
         VERBATIM
     )
 endif()
-
-add_custom_target(run_cpp_generator_package_manager
-    COMMAND "${CPP_GENERATOR}" --metadata "${METADATA_JSON}" --module-dir "${PLUGINS_OUTPUT_DIR}"
-    WORKING_DIRECTORY "${LOGOS_DEPS_ROOT}"
-    COMMENT "Running logos-cpp-generator on ${METADATA_JSON} with module-dir ${PLUGINS_OUTPUT_DIR}"
-    VERBATIM
-)
-add_dependencies(run_cpp_generator_package_manager cpp_generator_build)
 
 # Plugin sources
 set(PLUGIN_SOURCES
     package_manager_plugin.cpp
     package_manager_plugin.h
     package_manager_interface.h
-    ${LOGOS_LIBLOGOS_ROOT}/interface.h
-    ${LOGOS_CPP_SDK_ROOT}/cpp/generated/logos_sdk.cpp
-    ${LOGOS_CPP_SDK_ROOT}/cpp/logos_api.cpp
-    ${LOGOS_CPP_SDK_ROOT}/cpp/logos_api.h
-    ${LOGOS_CPP_SDK_ROOT}/cpp/logos_api_client.cpp
-    ${LOGOS_CPP_SDK_ROOT}/cpp/logos_api_client.h
-    ${LOGOS_CPP_SDK_ROOT}/cpp/logos_api_consumer.cpp
-    ${LOGOS_CPP_SDK_ROOT}/cpp/logos_api_consumer.h
-    ${LOGOS_CPP_SDK_ROOT}/cpp/logos_api_provider.cpp
-    ${LOGOS_CPP_SDK_ROOT}/cpp/logos_api_provider.h
-    ${LOGOS_CPP_SDK_ROOT}/cpp/token_manager.cpp
-    ${LOGOS_CPP_SDK_ROOT}/cpp/token_manager.h
-    ${LOGOS_CPP_SDK_ROOT}/cpp/module_proxy.cpp
-    ${LOGOS_CPP_SDK_ROOT}/cpp/module_proxy.h
 )
+
+# Add liblogos interface header
+if(_liblogos_is_source)
+    list(APPEND PLUGIN_SOURCES ${LOGOS_LIBLOGOS_ROOT}/interface.h)
+else()
+    list(APPEND PLUGIN_SOURCES ${LOGOS_LIBLOGOS_ROOT}/include/interface.h)
+endif()
+
+# Add SDK sources (only if source layout, installed layout uses the library)
+if(_cpp_sdk_is_source)
+    list(APPEND PLUGIN_SOURCES
+        ${LOGOS_CPP_SDK_ROOT}/cpp/logos_api.cpp
+        ${LOGOS_CPP_SDK_ROOT}/cpp/logos_api.h
+        ${LOGOS_CPP_SDK_ROOT}/cpp/logos_api_client.cpp
+        ${LOGOS_CPP_SDK_ROOT}/cpp/logos_api_client.h
+        ${LOGOS_CPP_SDK_ROOT}/cpp/logos_api_consumer.cpp
+        ${LOGOS_CPP_SDK_ROOT}/cpp/logos_api_consumer.h
+        ${LOGOS_CPP_SDK_ROOT}/cpp/logos_api_provider.cpp
+        ${LOGOS_CPP_SDK_ROOT}/cpp/logos_api_provider.h
+        ${LOGOS_CPP_SDK_ROOT}/cpp/token_manager.cpp
+        ${LOGOS_CPP_SDK_ROOT}/cpp/token_manager.h
+        ${LOGOS_CPP_SDK_ROOT}/cpp/module_proxy.cpp
+        ${LOGOS_CPP_SDK_ROOT}/cpp/module_proxy.h
+    )
+endif()
 
 # Create the plugin library
 add_library(package_manager_plugin SHARED ${PLUGIN_SOURCES})
-
-# Mark generated source
-set_source_files_properties(${LOGOS_CPP_SDK_ROOT}/cpp/generated/logos_sdk.cpp PROPERTIES GENERATED TRUE)
 
 # Set output name without lib prefix
 set_target_properties(package_manager_plugin PROPERTIES
@@ -107,13 +166,32 @@ target_link_libraries(package_manager_plugin PRIVATE
     Qt${QT_VERSION_MAJOR}::Core 
     Qt${QT_VERSION_MAJOR}::RemoteObjects)
 
+# Link SDK library if using installed layout
+if(NOT _cpp_sdk_is_source)
+    find_library(LOGOS_SDK_LIB logos_sdk PATHS ${LOGOS_CPP_SDK_ROOT}/lib NO_DEFAULT_PATH REQUIRED)
+    target_link_libraries(package_manager_plugin PRIVATE ${LOGOS_SDK_LIB})
+endif()
+
 # Include directories
 target_include_directories(package_manager_plugin PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${LOGOS_LIBLOGOS_ROOT}
-    ${LOGOS_CPP_SDK_ROOT}/cpp
-    ${LOGOS_CPP_SDK_ROOT}/cpp/generated
 )
+
+# Add include directories based on layout type
+if(_liblogos_is_source)
+    target_include_directories(package_manager_plugin PRIVATE ${LOGOS_LIBLOGOS_ROOT})
+else()
+    target_include_directories(package_manager_plugin PRIVATE ${LOGOS_LIBLOGOS_ROOT}/include)
+endif()
+
+if(_cpp_sdk_is_source)
+    target_include_directories(package_manager_plugin PRIVATE 
+        ${LOGOS_CPP_SDK_ROOT}/cpp
+        ${LOGOS_CPP_SDK_ROOT}/cpp/generated
+    )
+else()
+    target_include_directories(package_manager_plugin PRIVATE ${LOGOS_CPP_SDK_ROOT}/include)
+endif()
 
 # Set common properties for both platforms
 set_target_properties(package_manager_plugin PROPERTIES
@@ -139,3 +217,18 @@ else()
         INSTALL_RPATH "$ORIGIN"
         INSTALL_RPATH_USE_LINK_PATH FALSE)
 endif()
+
+install(TARGETS package_manager_plugin
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/logos/modules
+    RUNTIME DESTINATION ${CMAKE_INSTALL_LIBDIR}/logos/modules
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}/logos/modules
+)
+
+install(FILES ${METADATA_JSON}
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/logos-package-manager
+)
+
+install(DIRECTORY "${PLUGINS_OUTPUT_DIR}/"
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/logos-package-manager/generated
+    OPTIONAL
+)

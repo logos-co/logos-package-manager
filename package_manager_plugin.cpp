@@ -11,8 +11,7 @@
 #include <QRemoteObjectNode>
 #include <QRemoteObjectReplica>
 #include <QRemoteObjectPendingCall>
-#include "../../logos-cpp-sdk/cpp/logos_api_client.h"
-#include "logos_sdk.h"
+#include "logos_api_client.h"
 
 PackageManagerPlugin::PackageManagerPlugin()
 {
@@ -154,10 +153,9 @@ bool PackageManagerPlugin::installPlugin(const QString& pluginPath)
         return false;
     }
 
-    LogosModules logos(logosAPI);
-
     qDebug() << "Calling processPlugin with destinationPath:" << destinationPath;
-    QString pluginName = logos.core_manager.processPlugin(destinationPath);
+    QVariant result = coreManagerClient->invokeRemoteMethod("core_manager_api", "processPlugin", destinationPath);
+    QString pluginName = result.toString();
     if (pluginName.isEmpty()) {
         qDebug() << "ERROR: --------------------------------";
         qWarning() << "Failed to process installed plugin:" << destinationPath;
