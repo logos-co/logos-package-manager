@@ -1,1 +1,113 @@
 # logos-package-manager
+
+C++ library and CLI for local Logos package management — installing `.lgx` packages, scanning installed modules, platform variant selection, and LGX extraction.
+
+This repo handles **local operations** only. It does not fetch packages from the network — that is the responsibility of [logos-package-downloader](https://github.com/logos-co/logos-package-downloader).
+
+## Library API
+
+```cpp
+#include <package_manager_lib.h>
+
+PackageManagerLib pm;
+
+// Configure target directories (4-directory model)
+pm.setEmbeddedModulesDirectory("/path/to/embedded/modules");
+pm.setUserModulesDirectory("/path/to/user/modules");
+pm.setEmbeddedUiPluginsDirectory("/path/to/embedded/plugins");
+pm.setUserUiPluginsDirectory("/path/to/user/plugins");
+
+// Install from a local .lgx file (auto-detects type, installs to user directory)
+std::string errorMsg;
+std::string installedPath = pm.installPluginFile("/path/to/module.lgx", errorMsg);
+// skipIfNotNewer: skip installation if an equal-or-newer version is already installed
+std::string path = pm.installPluginFile("/path/to/module.lgx", errorMsg, /*skipIfNotNewer=*/true);
+
+// Scan installed packages (returns JSON array string)
+// Each entry includes all manifest.json fields + "installDir" + "mainFilePath"
+std::string modules = pm.getInstalledModules();      // type=core only
+std::string uiPlugins = pm.getInstalledUiPlugins();   // type=ui,ui_qml only
+std::string all = pm.getInstalledPackages();           // all types
+
+// Platform variant helpers
+std::string variant = PackageManagerLib::currentPlatformVariant();     // e.g. "darwin-arm64"
+std::vector<std::string> variants = PackageManagerLib::platformVariantsToTry(); // ordered fallback list
+
+// Low-level LGX extraction
+pm.extractLgxPackage("/path/to/module.lgx", "/output/dir", errorMsg);
+pm.copyLibraryFromExtracted("/extracted/dir", "/target/dir",
+                            /*isCoreModule=*/true, outModuleName, errorMsg);
+
+// Utilities
+bool newer = PackageManagerLib::versionGreaterOrEqual("1.2.0", "1.1.0");
+PackageManagerLib::copyDirectoryContents("/src", "/dst", errorMsg);
+```
+
+### C API
+
+A C-compatible API is available via `lgpm.h` for use from non-C++ consumers:
+
+```c
+#include <lgpm.h>
+
+lgpm_context_t ctx = lgpm_create();
+lgpm_set_user_modules_dir(ctx, "/path/to/modules");
+char* result = lgpm_install_file(ctx, "/path/to/module.lgx", false);
+lgpm_free_string(result);
+lgpm_free(ctx);
+```
+
+## CLI (`lgpm`)
+
+```
+lgpm [options] <command> [arguments]
+
+Commands:
+  install --file <path>       Install from a local LGX file
+  install --dir <path>        Install all LGX files in a directory
+  list                        List installed packages
+  info <package>              Show installed package details
+
+Options:
+  --modules-dir <path>        Target directory for core modules
+  --ui-plugins-dir <path>     Target directory for UI plugins
+  --json                      Output in JSON format
+  -h, --help                  Show help
+  -v, --version               Show version
+```
+
+### Examples
+
+```bash
+# Install a local .lgx package
+lgpm --modules-dir ./modules install --file ./waku_module.lgx
+
+# Install all .lgx files in a directory
+lgpm --modules-dir ./modules --ui-plugins-dir ./plugins install --dir ./packages/
+
+# List installed modules
+lgpm --modules-dir ./modules --ui-plugins-dir ./plugins list
+
+# Show package info (JSON)
+lgpm --modules-dir ./modules info waku_module --json
+```
+
+## Building
+
+```bash
+nix build                        # library + CLI
+nix build .#lib                  # library only
+nix build .#cli                  # CLI only
+```
+
+## Testing
+
+```bash
+nix flake check                  # run all tests
+nix build .#tests                # build and run tests
+```
+
+## Dependencies
+
+- `logos-package` — LGX format library
+- `nlohmann_json` — JSON parsing

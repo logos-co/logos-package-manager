@@ -1,0 +1,34 @@
+# Builds the logos-package-manager CLI (lgpm)
+{ pkgs, common, src, logosPackageLib }:
+
+let
+  lib = import ./lib.nix { inherit pkgs common src logosPackageLib; };
+in
+pkgs.stdenv.mkDerivation {
+  pname = "${common.pname}-cli";
+  version = common.version;
+
+  inherit src;
+  inherit (common) buildInputs cmakeFlags meta env;
+
+  # Add autoPatchelfHook on Linux to fix RPATHs
+  nativeBuildInputs = common.nativeBuildInputs ++
+    pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.autoPatchelfHook ];
+
+  installPhase = ''
+    runHook preInstall
+
+    mkdir -p $out/bin $out/lib
+    if [ -f bin/lgpm ]; then
+      cp bin/lgpm $out/bin/
+    else
+      echo "Error: lgpm executable not found"
+      exit 1
+    fi
+
+    # Copy libraries alongside the binary so RPATH can find them
+    cp -a ${lib}/lib/* $out/lib/
+
+    runHook postInstall
+  '';
+}
