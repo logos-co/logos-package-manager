@@ -9,15 +9,20 @@ public:
     PackageManagerLib();
     ~PackageManagerLib();
 
-    // Directory management
+    // Directory management — embedded directories (multiple, read-only at runtime)
     void setEmbeddedModulesDirectory(const std::string& dir);
-    void setUserModulesDirectory(const std::string& dir);
+    void addEmbeddedModulesDirectory(const std::string& dir);
     void setEmbeddedUiPluginsDirectory(const std::string& dir);
+    void addEmbeddedUiPluginsDirectory(const std::string& dir);
+
+    std::vector<std::string> embeddedModulesDirectories() const { return m_embeddedModulesDirs; }
+    std::vector<std::string> embeddedUiPluginsDirectories() const { return m_embeddedUiPluginsDirs; }
+
+    // Directory management — user directories (single, writable, where new packages are installed)
+    void setUserModulesDirectory(const std::string& dir);
     void setUserUiPluginsDirectory(const std::string& dir);
 
-    std::string embeddedModulesDirectory() const { return m_embeddedModulesDir; }
     std::string userModulesDirectory() const { return m_userModulesDir; }
-    std::string embeddedUiPluginsDirectory() const { return m_embeddedUiPluginsDir; }
     std::string userUiPluginsDirectory() const { return m_userUiPluginsDir; }
 
     // All modules directories (embedded + user) for scanning
@@ -56,8 +61,8 @@ public:
     static bool copyDirectoryContents(const std::string& srcDir, const std::string& destDir, std::string& errorMsg);
 
 private:
-    std::string m_embeddedModulesDir;
+    std::vector<std::string> m_embeddedModulesDirs;
     std::string m_userModulesDir;
-    std::string m_embeddedUiPluginsDir;
+    std::vector<std::string> m_embeddedUiPluginsDirs;
     std::string m_userUiPluginsDir;
 };

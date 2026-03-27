@@ -11,10 +11,14 @@ This repo handles **local operations** only. It does not fetch packages from the
 
 PackageManagerLib pm;
 
-// Configure target directories (4-directory model)
-pm.setEmbeddedModulesDirectory("/path/to/embedded/modules");
-pm.setUserModulesDirectory("/path/to/user/modules");
+// Configure embedded directories (multiple, read-only at runtime)
+pm.setEmbeddedModulesDirectory("/path/to/embedded/modules");       // clears + sets first
+pm.addEmbeddedModulesDirectory("/path/to/more/embedded/modules");  // appends additional
 pm.setEmbeddedUiPluginsDirectory("/path/to/embedded/plugins");
+pm.addEmbeddedUiPluginsDirectory("/path/to/more/embedded/plugins");
+
+// Configure user directories (single, writable, where new packages are installed)
+pm.setUserModulesDirectory("/path/to/user/modules");
 pm.setUserUiPluginsDirectory("/path/to/user/plugins");
 
 // Install from a local .lgx file (auto-detects type, installs to user directory)
@@ -51,8 +55,10 @@ A C-compatible API is available via `lgpm.h` for use from non-C++ consumers:
 #include <lgpm.h>
 
 lgpm_context_t ctx = lgpm_create();
-lgpm_set_user_modules_dir(ctx, "/path/to/modules");
-char* result = lgpm_install_file(ctx, "/path/to/module.lgx", false);
+lgpm_set_embedded_modules_dir(ctx, "/path/to/embedded/modules");
+lgpm_add_embedded_modules_dir(ctx, "/path/to/more/embedded/modules");
+lgpm_set_user_modules_dir(ctx, "/path/to/user/modules");
+char* result = lgpm_install_file(ctx, "/path/to/module.lgx", false, NULL, NULL);
 lgpm_free_string(result);
 lgpm_free(ctx);
 ```

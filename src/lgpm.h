@@ -44,9 +44,11 @@ typedef struct {
 LGPM_EXPORT lgpm_context_t lgpm_create(void);
 LGPM_EXPORT void lgpm_free(lgpm_context_t ctx);
 
-/* Configuration — embedded directories (read-only, set at build time) */
+/* Configuration — embedded directories (multiple, read-only, set at build time) */
 LGPM_EXPORT void lgpm_set_embedded_modules_dir(lgpm_context_t ctx, const char* dir);
+LGPM_EXPORT void lgpm_add_embedded_modules_dir(lgpm_context_t ctx, const char* dir);
 LGPM_EXPORT void lgpm_set_embedded_ui_plugins_dir(lgpm_context_t ctx, const char* dir);
+LGPM_EXPORT void lgpm_add_embedded_ui_plugins_dir(lgpm_context_t ctx, const char* dir);
 
 /* Configuration — user directories (read-write, where new packages are installed) */
 LGPM_EXPORT void lgpm_set_user_modules_dir(lgpm_context_t ctx, const char* dir);
