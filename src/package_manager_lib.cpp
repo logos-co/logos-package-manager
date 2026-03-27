@@ -46,7 +46,13 @@ PackageManagerLib::~PackageManagerLib()
 
 void PackageManagerLib::setEmbeddedModulesDirectory(const std::string& dir)
 {
-    m_embeddedModulesDir = dir;
+    m_embeddedModulesDirs.clear();
+    if (!dir.empty()) m_embeddedModulesDirs.push_back(dir);
+}
+
+void PackageManagerLib::addEmbeddedModulesDirectory(const std::string& dir)
+{
+    if (!dir.empty()) m_embeddedModulesDirs.push_back(dir);
 }
 
 void PackageManagerLib::setUserModulesDirectory(const std::string& dir)
@@ -56,7 +62,13 @@ void PackageManagerLib::setUserModulesDirectory(const std::string& dir)
 
 void PackageManagerLib::setEmbeddedUiPluginsDirectory(const std::string& dir)
 {
-    m_embeddedUiPluginsDir = dir;
+    m_embeddedUiPluginsDirs.clear();
+    if (!dir.empty()) m_embeddedUiPluginsDirs.push_back(dir);
+}
+
+void PackageManagerLib::addEmbeddedUiPluginsDirectory(const std::string& dir)
+{
+    if (!dir.empty()) m_embeddedUiPluginsDirs.push_back(dir);
 }
 
 void PackageManagerLib::setUserUiPluginsDirectory(const std::string& dir)
@@ -66,26 +78,23 @@ void PackageManagerLib::setUserUiPluginsDirectory(const std::string& dir)
 
 std::vector<std::string> PackageManagerLib::allModulesDirectories() const
 {
-    std::vector<std::string> dirs;
-    if (!m_embeddedModulesDir.empty()) dirs.push_back(m_embeddedModulesDir);
+    std::vector<std::string> dirs = m_embeddedModulesDirs;
     if (!m_userModulesDir.empty()) dirs.push_back(m_userModulesDir);
     return dirs;
 }
 
 std::vector<std::string> PackageManagerLib::allUiPluginsDirectories() const
 {
-    std::vector<std::string> dirs;
-    if (!m_embeddedUiPluginsDir.empty()) dirs.push_back(m_embeddedUiPluginsDir);
+    std::vector<std::string> dirs = m_embeddedUiPluginsDirs;
     if (!m_userUiPluginsDir.empty()) dirs.push_back(m_userUiPluginsDir);
     return dirs;
 }
 
 std::vector<std::string> PackageManagerLib::allDirectories() const
 {
-    std::vector<std::string> dirs;
-    if (!m_embeddedModulesDir.empty()) dirs.push_back(m_embeddedModulesDir);
+    std::vector<std::string> dirs = m_embeddedModulesDirs;
     if (!m_userModulesDir.empty()) dirs.push_back(m_userModulesDir);
-    if (!m_embeddedUiPluginsDir.empty()) dirs.push_back(m_embeddedUiPluginsDir);
+    dirs.insert(dirs.end(), m_embeddedUiPluginsDirs.begin(), m_embeddedUiPluginsDirs.end());
     if (!m_userUiPluginsDir.empty()) dirs.push_back(m_userUiPluginsDir);
     return dirs;
 }

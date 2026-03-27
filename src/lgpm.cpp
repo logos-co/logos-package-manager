@@ -37,8 +37,16 @@ void lgpm_set_embedded_modules_dir(lgpm_context_t ctx, const char* dir) {
     if (ctx && dir) ctx->lib.setEmbeddedModulesDirectory(dir);
 }
 
+void lgpm_add_embedded_modules_dir(lgpm_context_t ctx, const char* dir) {
+    if (ctx && dir) ctx->lib.addEmbeddedModulesDirectory(dir);
+}
+
 void lgpm_set_embedded_ui_plugins_dir(lgpm_context_t ctx, const char* dir) {
     if (ctx && dir) ctx->lib.setEmbeddedUiPluginsDirectory(dir);
+}
+
+void lgpm_add_embedded_ui_plugins_dir(lgpm_context_t ctx, const char* dir) {
+    if (ctx && dir) ctx->lib.addEmbeddedUiPluginsDirectory(dir);
 }
 
 void lgpm_set_user_modules_dir(lgpm_context_t ctx, const char* dir) {

@@ -162,9 +162,9 @@ TEST_F(ScanningTest, DirectoryManagement) {
     pm.setEmbeddedUiPluginsDirectory("/c");
     pm.setUserUiPluginsDirectory("/d");
 
-    EXPECT_EQ(pm.embeddedModulesDirectory(), "/a");
+    EXPECT_EQ(pm.embeddedModulesDirectories(), std::vector<std::string>{"/a"});
     EXPECT_EQ(pm.userModulesDirectory(), "/b");
-    EXPECT_EQ(pm.embeddedUiPluginsDirectory(), "/c");
+    EXPECT_EQ(pm.embeddedUiPluginsDirectories(), std::vector<std::string>{"/c"});
     EXPECT_EQ(pm.userUiPluginsDirectory(), "/d");
 
     auto moduleDirs = pm.allModulesDirectories();
@@ -175,6 +175,68 @@ TEST_F(ScanningTest, DirectoryManagement) {
 
     auto allDirs = pm.allDirectories();
     EXPECT_EQ(allDirs.size(), 4);
+}
+
+TEST_F(ScanningTest, MultipleEmbeddedDirectories) {
+    PackageManagerLib pm;
+
+    pm.setEmbeddedModulesDirectory("/a");
+    pm.addEmbeddedModulesDirectory("/b");
+    pm.addEmbeddedModulesDirectory("/c");
+
+    auto dirs = pm.embeddedModulesDirectories();
+    ASSERT_EQ(dirs.size(), 3);
+    EXPECT_EQ(dirs[0], "/a");
+    EXPECT_EQ(dirs[1], "/b");
+    EXPECT_EQ(dirs[2], "/c");
+
+    // set clears previous entries
+    pm.setEmbeddedModulesDirectory("/x");
+    EXPECT_EQ(pm.embeddedModulesDirectories().size(), 1);
+    EXPECT_EQ(pm.embeddedModulesDirectories()[0], "/x");
+}
+
+TEST_F(ScanningTest, MultipleEmbeddedUiPluginsDirectories) {
+    PackageManagerLib pm;
+
+    pm.setEmbeddedUiPluginsDirectory("/p1");
+    pm.addEmbeddedUiPluginsDirectory("/p2");
+
+    auto dirs = pm.embeddedUiPluginsDirectories();
+    ASSERT_EQ(dirs.size(), 2);
+    EXPECT_EQ(dirs[0], "/p1");
+    EXPECT_EQ(dirs[1], "/p2");
+}
+
+TEST_F(ScanningTest, MultipleEmbeddedDirsScanning) {
+    fs::path dir2 = fs::temp_directory_path() / ("lgpm_test_emb2_" + std::to_string(std::rand()));
+    fs::create_directories(dir2);
+
+    // Module in first embedded dir
+    createFakeModule("mod_a", "core");
+
+    // Module in second embedded dir
+    fs::path modB = dir2 / "mod_b";
+    fs::create_directories(modB);
+    json manifest;
+    manifest["name"] = "mod_b";
+    manifest["type"] = "core";
+    manifest["version"] = "1.0.0";
+    std::ofstream mf(modB / "manifest.json");
+    mf << manifest.dump(2);
+    mf.close();
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(tempDir.string());
+    pm.addEmbeddedModulesDirectory(dir2.string());
+
+    std::string result = pm.getInstalledModules();
+    json modules = json::parse(result);
+
+    EXPECT_EQ(modules.size(), 2);
+
+    std::error_code ec;
+    fs::remove_all(dir2, ec);
 }
 
 TEST_F(ScanningTest, SkipSubdirWithoutManifest) {
