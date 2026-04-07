@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <random>
+#include <iostream>
 #include <nlohmann/json.hpp>
 #include "lgx.h"
 
@@ -152,6 +153,38 @@ std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, 
                     }
                 }
             }
+        }
+    }
+
+    // Verify signature
+    if (m_signaturePolicy != SignaturePolicy::NONE) {
+        auto sigResult = verifyPackageSignature(pluginPath);
+
+        if (sigResult.is_signed && !sigResult.signature_valid) {
+            errorMsg = "Invalid signature: " + (sigResult.error.empty() ? "unknown error" : sigResult.error);
+            return {};
+        }
+        if (!sigResult.package_valid) {
+            errorMsg = "Package validation failed: " + (sigResult.error.empty() ? "unknown error" : sigResult.error);
+            return {};
+        }
+        if (!sigResult.is_signed && m_signaturePolicy == SignaturePolicy::REQUIRE) {
+            errorMsg = "Package is unsigned and signature policy requires signatures";
+            return {};
+        }
+        if (sigResult.is_signed && sigResult.trusted_as.empty()) {
+            if (m_tofuEnabled) {
+                const char* krDir = m_keyringDir.empty() ? nullptr : m_keyringDir.c_str();
+                const char* dispName = sigResult.signer_name.empty() ? nullptr : sigResult.signer_name.c_str();
+                const char* url = sigResult.signer_url.empty() ? nullptr : sigResult.signer_url.c_str();
+                lgx_keyring_add(krDir, "auto-trusted", sigResult.signer_did.c_str(), dispName, url);
+            } else if (m_signaturePolicy == SignaturePolicy::REQUIRE) {
+                errorMsg = "Package signed by unknown key and TOFU is disabled";
+                return {};
+            }
+        }
+        if (!sigResult.is_signed && m_signaturePolicy == SignaturePolicy::WARN) {
+            std::cerr << "Warning: Package is unsigned: " << pluginPath << "\n";
         }
     }
 
@@ -556,6 +589,40 @@ bool PackageManagerLib::extractLgxPackage(const std::string& lgxPath, const std:
 
     lgx_free_package(pkg);
     return true;
+}
+
+void PackageManagerLib::setSignaturePolicy(SignaturePolicy policy)
+{
+    m_signaturePolicy = policy;
+}
+
+void PackageManagerLib::setKeyringDirectory(const std::string& dir)
+{
+    m_keyringDir = dir;
+}
+
+void PackageManagerLib::setTofuEnabled(bool enabled)
+{
+    m_tofuEnabled = enabled;
+}
+
+SignatureVerificationResult PackageManagerLib::verifyPackageSignature(const std::string& lgxPath)
+{
+    SignatureVerificationResult result;
+    const char* krDir = m_keyringDir.empty() ? nullptr : m_keyringDir.c_str();
+    lgx_signature_info_t info = lgx_verify_signature(lgxPath.c_str(), krDir);
+
+    result.is_signed = info.is_signed;
+    result.signature_valid = info.signature_valid;
+    result.package_valid = info.package_valid;
+    if (info.signer_did) result.signer_did = info.signer_did;
+    if (info.signer_name) result.signer_name = info.signer_name;
+    if (info.signer_url) result.signer_url = info.signer_url;
+    if (info.trusted_as) result.trusted_as = info.trusted_as;
+    if (info.error) result.error = info.error;
+
+    lgx_free_signature_info(info);
+    return result;
 }
 
 bool PackageManagerLib::copyLibraryFromExtracted(const std::string& extractedDir, const std::string& targetDir,

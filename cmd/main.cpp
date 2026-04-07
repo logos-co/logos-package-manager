@@ -42,6 +42,10 @@ static void printHelp() {
               << "  --file <path>           LGX file path (for install command)\n"
               << "  --dir <path>            Directory of LGX files (for install command)\n"
               << "  --json                  Output in JSON format\n"
+              << "  --allow-unsigned        Accept unsigned packages without warning\n"
+              << "  --require-signatures    Reject unsigned packages\n"
+              << "  --tofu                  Trust unknown signing keys on first use\n"
+              << "  --keyring <path>        Override keyring directory\n"
               << "  -h, --help              Show this help message\n"
               << "  -v, --version           Show version information\n";
 }
@@ -191,9 +195,12 @@ static int cmdInfo(PackageManagerLib& pm, const std::string& packageName, bool j
 int main(int argc, char* argv[]) {
     std::vector<std::string> args(argv + 1, argv + argc);
 
-    std::string modulesDir, uiPluginsDir, filePath, installDir, command;
+    std::string modulesDir, uiPluginsDir, filePath, installDir, command, keyringDir;
     std::vector<std::string> positionalArgs;
     bool jsonOutput = false;
+    bool allowUnsigned = false;
+    bool requireSignatures = false;
+    bool tofu = false;
 
     for (size_t i = 0; i < args.size(); ++i) {
         if (args[i] == "-h" || args[i] == "--help") {
@@ -206,8 +213,15 @@ int main(int argc, char* argv[]) {
         } else if (parseOption(args, i, "--ui-plugins-dir", uiPluginsDir)) {
         } else if (parseOption(args, i, "--file", filePath)) {
         } else if (parseOption(args, i, "--dir", installDir)) {
+        } else if (parseOption(args, i, "--keyring", keyringDir)) {
         } else if (args[i] == "--json") {
             jsonOutput = true;
+        } else if (args[i] == "--allow-unsigned") {
+            allowUnsigned = true;
+        } else if (args[i] == "--require-signatures") {
+            requireSignatures = true;
+        } else if (args[i] == "--tofu") {
+            tofu = true;
         } else {
             positionalArgs.push_back(args[i]);
         }
@@ -227,6 +241,17 @@ int main(int argc, char* argv[]) {
         pm.setUserModulesDirectory(modulesDir);
     if (!uiPluginsDir.empty())
         pm.setUserUiPluginsDirectory(uiPluginsDir);
+
+    // Signature policy
+    if (requireSignatures)
+        pm.setSignaturePolicy(SignaturePolicy::REQUIRE);
+    else if (allowUnsigned)
+        pm.setSignaturePolicy(SignaturePolicy::NONE);
+
+    if (!keyringDir.empty())
+        pm.setKeyringDirectory(keyringDir);
+    if (tofu)
+        pm.setTofuEnabled(true);
 
     if (command == "install") {
         if (!filePath.empty()) {
