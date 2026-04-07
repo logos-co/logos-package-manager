@@ -78,8 +78,6 @@ public:
     SignaturePolicy signaturePolicy() const { return m_signaturePolicy; }
     void setKeyringDirectory(const std::string& dir);
     std::string keyringDirectory() const { return m_keyringDir; }
-    void setTofuEnabled(bool enabled);
-    bool tofuEnabled() const { return m_tofuEnabled; }
 
     // Standalone signature verification
     SignatureVerificationResult verifyPackageSignature(const std::string& lgxPath);
@@ -95,5 +93,4 @@ private:
     std::string m_userUiPluginsDir;
     SignaturePolicy m_signaturePolicy = SignaturePolicy::WARN;
     std::string m_keyringDir;
-    bool m_tofuEnabled = false;
 };

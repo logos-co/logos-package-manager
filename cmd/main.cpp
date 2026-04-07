@@ -44,7 +44,6 @@ static void printHelp() {
               << "  --json                  Output in JSON format\n"
               << "  --allow-unsigned        Accept unsigned packages without warning\n"
               << "  --require-signatures    Reject unsigned packages\n"
-              << "  --tofu                  Trust unknown signing keys on first use\n"
               << "  --keyring <path>        Override keyring directory\n"
               << "  -h, --help              Show this help message\n"
               << "  -v, --version           Show version information\n";
@@ -200,8 +199,6 @@ int main(int argc, char* argv[]) {
     bool jsonOutput = false;
     bool allowUnsigned = false;
     bool requireSignatures = false;
-    bool tofu = false;
-
     for (size_t i = 0; i < args.size(); ++i) {
         if (args[i] == "-h" || args[i] == "--help") {
             printHelp();
@@ -220,8 +217,6 @@ int main(int argc, char* argv[]) {
             allowUnsigned = true;
         } else if (args[i] == "--require-signatures") {
             requireSignatures = true;
-        } else if (args[i] == "--tofu") {
-            tofu = true;
         } else {
             positionalArgs.push_back(args[i]);
         }
@@ -250,8 +245,6 @@ int main(int argc, char* argv[]) {
 
     if (!keyringDir.empty())
         pm.setKeyringDirectory(keyringDir);
-    if (tofu)
-        pm.setTofuEnabled(true);
 
     if (command == "install") {
         if (!filePath.empty()) {

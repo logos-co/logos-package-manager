@@ -121,10 +121,6 @@ void lgpm_set_keyring_path(lgpm_context_t ctx, const char* dir) {
     if (ctx && dir) ctx->lib.setKeyringDirectory(dir);
 }
 
-void lgpm_enable_tofu(lgpm_context_t ctx, bool enabled) {
-    if (ctx) ctx->lib.setTofuEnabled(enabled);
-}
-
 const char* lgpm_current_variant(void) {
     static thread_local std::string variant = PackageManagerLib::currentPlatformVariant();
     return variant.c_str();

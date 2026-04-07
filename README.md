@@ -45,7 +45,6 @@ pm.copyLibraryFromExtracted("/extracted/dir", "/target/dir",
 // Signature verification policy
 pm.setSignaturePolicy(SignaturePolicy::WARN);     // NONE, WARN (default), REQUIRE
 pm.setKeyringDirectory("/path/to/trusted-keys");  // default: ~/.config/logos/trusted-keys/
-pm.setTofuEnabled(true);                          // trust unknown keys on first use
 
 // Standalone signature verification
 SignatureVerificationResult sigInfo = pm.verifyPackageSignature("/path/to/module.lgx");

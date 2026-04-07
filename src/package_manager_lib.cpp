@@ -172,16 +172,10 @@ std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, 
             errorMsg = "Package is unsigned and signature policy requires signatures";
             return {};
         }
-        if (sigResult.is_signed && sigResult.trusted_as.empty()) {
-            if (m_tofuEnabled) {
-                const char* krDir = m_keyringDir.empty() ? nullptr : m_keyringDir.c_str();
-                const char* dispName = sigResult.signer_name.empty() ? nullptr : sigResult.signer_name.c_str();
-                const char* url = sigResult.signer_url.empty() ? nullptr : sigResult.signer_url.c_str();
-                lgx_keyring_add(krDir, "auto-trusted", sigResult.signer_did.c_str(), dispName, url);
-            } else if (m_signaturePolicy == SignaturePolicy::REQUIRE) {
-                errorMsg = "Package signed by unknown key and TOFU is disabled";
-                return {};
-            }
+        if (sigResult.is_signed && sigResult.trusted_as.empty() &&
+            m_signaturePolicy == SignaturePolicy::REQUIRE) {
+            errorMsg = "Package signed by untrusted key: " + sigResult.signer_did;
+            return {};
         }
         if (!sigResult.is_signed && m_signaturePolicy == SignaturePolicy::WARN) {
             std::cerr << "Warning: Package is unsigned: " << pluginPath << "\n";
@@ -599,11 +593,6 @@ void PackageManagerLib::setSignaturePolicy(SignaturePolicy policy)
 void PackageManagerLib::setKeyringDirectory(const std::string& dir)
 {
     m_keyringDir = dir;
-}
-
-void PackageManagerLib::setTofuEnabled(bool enabled)
-{
-    m_tofuEnabled = enabled;
 }
 
 SignatureVerificationResult PackageManagerLib::verifyPackageSignature(const std::string& lgxPath)

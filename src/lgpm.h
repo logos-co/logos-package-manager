@@ -99,12 +99,6 @@ LGPM_EXPORT void lgpm_set_signature_policy(lgpm_context_t ctx, const char* polic
  */
 LGPM_EXPORT void lgpm_set_keyring_path(lgpm_context_t ctx, const char* dir);
 
-/**
- * Enable Trust On First Use (TOFU) for unknown signing keys.
- * When enabled, unknown keys are automatically added to the keyring.
- */
-LGPM_EXPORT void lgpm_enable_tofu(lgpm_context_t ctx, bool enabled);
-
 /* Platform variant */
 LGPM_EXPORT const char* lgpm_current_variant(void);
 LGPM_EXPORT const char** lgpm_variants_to_try(void);
