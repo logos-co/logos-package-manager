@@ -36,6 +36,11 @@ pkgs.stdenv.mkDerivation {
     cp ${src}/src/package_manager_lib.h $out/include/
     cp ${src}/src/lgpm.h $out/include/
 
+    # Copy lgx.h from logos-package so downstream consumers can use the lgx C API
+    if [ -f ${logosPackageLib}/include/lgx.h ]; then
+      cp ${logosPackageLib}/include/lgx.h $out/include/
+    fi
+
     runHook postInstall
   '';
 }
