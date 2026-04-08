@@ -71,7 +71,6 @@ lgpm_set_user_modules_dir(ctx, "/path/to/user/modules");
 // Signature policy
 lgpm_set_signature_policy(ctx, "require");  // "none", "warn", "require"
 lgpm_set_keyring_path(ctx, "/path/to/trusted-keys");
-lgpm_enable_tofu(ctx, true);
 
 char* result = lgpm_install_file(ctx, "/path/to/module.lgx", false, NULL, NULL);
 lgpm_free_string(result);
@@ -94,8 +93,7 @@ Options:
   --ui-plugins-dir <path>     Target directory for UI plugins
   --json                      Output in JSON format
   --allow-unsigned            Accept unsigned packages without warning
-  --require-signatures        Reject unsigned packages
-  --tofu                      Trust unknown signing keys on first use
+  --require-signatures        Reject unsigned packages and untrusted signers
   --keyring <path>            Override keyring directory
   -h, --help                  Show help
   -v, --version               Show version
