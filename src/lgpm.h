@@ -85,6 +85,20 @@ LGPM_EXPORT char* lgpm_get_installed_modules(lgpm_context_t ctx);
  */
 LGPM_EXPORT char* lgpm_get_installed_ui_plugins(lgpm_context_t ctx);
 
+/* Signature policy configuration */
+
+/**
+ * Set signature verification policy.
+ * @param policy "none", "warn", or "require"
+ */
+LGPM_EXPORT void lgpm_set_signature_policy(lgpm_context_t ctx, const char* policy);
+
+/**
+ * Set keyring directory for trusted key lookup.
+ * @param dir Path to keyring directory (NULL for default ~/.config/logos/trusted-keys/)
+ */
+LGPM_EXPORT void lgpm_set_keyring_path(lgpm_context_t ctx, const char* dir);
+
 /* Platform variant */
 LGPM_EXPORT const char* lgpm_current_variant(void);
 LGPM_EXPORT const char** lgpm_variants_to_try(void);

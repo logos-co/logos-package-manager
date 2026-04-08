@@ -3,6 +3,23 @@
 #include <string>
 #include <vector>
 
+enum class SignaturePolicy {
+    NONE,    // Accept all packages without checking signatures
+    WARN,    // Accept unsigned packages with a warning (default)
+    REQUIRE  // Reject unsigned packages and packages with unknown signers
+};
+
+struct SignatureVerificationResult {
+    bool is_signed = false;
+    bool signature_valid = false;
+    bool package_valid = false;
+    std::string signer_did;    // did:jwk:... string
+    std::string signer_name;   // self-asserted display name
+    std::string signer_url;    // self-asserted URL
+    std::string trusted_as;    // keyring name if trusted, empty otherwise
+    std::string error;         // error message if any
+};
+
 class PackageManagerLib
 {
 public:
@@ -56,6 +73,15 @@ public:
     static std::string currentPlatformVariant();
     static std::vector<std::string> platformVariantsToTry();
 
+    // Signature policy configuration
+    void setSignaturePolicy(SignaturePolicy policy);
+    SignaturePolicy signaturePolicy() const { return m_signaturePolicy; }
+    void setKeyringDirectory(const std::string& dir);
+    std::string keyringDirectory() const { return m_keyringDir; }
+
+    // Standalone signature verification
+    SignatureVerificationResult verifyPackageSignature(const std::string& lgxPath);
+
     // Utilities
     static bool versionGreaterOrEqual(const std::string& a, const std::string& b);
     static bool copyDirectoryContents(const std::string& srcDir, const std::string& destDir, std::string& errorMsg);
@@ -65,4 +91,6 @@ private:
     std::string m_userModulesDir;
     std::vector<std::string> m_embeddedUiPluginsDirs;
     std::string m_userUiPluginsDir;
+    SignaturePolicy m_signaturePolicy = SignaturePolicy::WARN;
+    std::string m_keyringDir;
 };

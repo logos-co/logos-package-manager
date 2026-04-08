@@ -109,6 +109,18 @@ char* lgpm_get_installed_ui_plugins(lgpm_context_t ctx) {
     return to_c_string(ctx->lib.getInstalledUiPlugins());
 }
 
+void lgpm_set_signature_policy(lgpm_context_t ctx, const char* policy) {
+    if (!ctx || !policy) return;
+    std::string p(policy);
+    if (p == "none") ctx->lib.setSignaturePolicy(SignaturePolicy::NONE);
+    else if (p == "warn") ctx->lib.setSignaturePolicy(SignaturePolicy::WARN);
+    else if (p == "require") ctx->lib.setSignaturePolicy(SignaturePolicy::REQUIRE);
+}
+
+void lgpm_set_keyring_path(lgpm_context_t ctx, const char* dir) {
+    if (ctx && dir) ctx->lib.setKeyringDirectory(dir);
+}
+
 const char* lgpm_current_variant(void) {
     static thread_local std::string variant = PackageManagerLib::currentPlatformVariant();
     return variant.c_str();
