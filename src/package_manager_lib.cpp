@@ -272,6 +272,7 @@ std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, 
 
     // Determine the installed main file path
     if (installedPluginPath) {
+        *installedPluginPath = {};
         std::string mainFile;
         bool isQmlPackage = (detectedType == "ui_qml");
         fs::path installedManifestPath = fs::path(installDir) / installedModuleName / "manifest.json";
@@ -280,34 +281,39 @@ std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, 
             if (mf.is_open()) {
                 try {
                     json doc = json::parse(mf);
-                    if (doc.contains("main") && doc["main"].is_object()) {
-                        for (const auto& v : platformVariantsToTry()) {
-                            if (doc["main"].contains(v)) {
-                                mainFile = doc["main"][v].get<std::string>();
-                                if (!mainFile.empty())
-                                    break;
+                    if (doc.contains("main")) {
+                        if (doc["main"].is_object()) {
+                            for (const auto& v : platformVariantsToTry()) {
+                                if (doc["main"].contains(v)) {
+                                    mainFile = doc["main"][v].get<std::string>();
+                                    if (!mainFile.empty())
+                                        break;
+                                }
                             }
+                        } else if (doc["main"].is_string()) {
+                            mainFile = doc["main"].get<std::string>();
                         }
                     }
                 } catch (...) {}
             }
         }
-        if (mainFile.empty()) {
+        if (mainFile.empty() && !isQmlPackage) {
             mainFile = installedModuleName;
         }
-        // For core and ui packages, append platform-specific library extension
-        if (!isQmlPackage && mainFile.find('.') == std::string::npos) {
+        if (!mainFile.empty()) {
+            if (!isQmlPackage && mainFile.find('.') == std::string::npos) {
 #if defined(__APPLE__)
-            mainFile += ".dylib";
+                mainFile += ".dylib";
 #elif defined(_WIN32)
-            mainFile += ".dll";
+                mainFile += ".dll";
 #else
-            mainFile += ".so";
+                mainFile += ".so";
 #endif
-        }
-        fs::path mainPath = fs::path(installDir) / installedModuleName / mainFile;
-        if (fs::exists(mainPath)) {
-            *installedPluginPath = mainPath.string();
+            }
+            fs::path mainPath = fs::path(installDir) / installedModuleName / mainFile;
+            if (fs::exists(mainPath)) {
+                *installedPluginPath = mainPath.string();
+            }
         }
     }
 
@@ -316,7 +322,9 @@ std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, 
 }
 
 // Shared scanning logic — scans directories for installed packages matching given types.
-// Returns JSON array; each element is a copy of manifest.json + "installDir" + "mainFilePath".
+// Returns JSON array; each element is a copy of manifest.json + "installDir" +
+// "mainFilePath". For ui_qml packages, mainFilePath refers only to the optional
+// backend plugin and may be empty.
 static std::string scanInstalledByTypes(const std::vector<std::string>& dirs,
                                          const std::vector<std::string>& types)
 {
@@ -359,7 +367,8 @@ static std::string scanInstalledByTypes(const std::vector<std::string>& dirs,
                 if (!matches) continue;
             }
 
-            // Resolve mainFilePath from the "main" field
+            // Resolve mainFilePath from the "main" field. For ui_qml, this is
+            // backend-only metadata and may legitimately be empty.
             std::string mainFilePath;
             if (manifest.contains("main")) {
                 if (manifest["main"].is_object()) {
