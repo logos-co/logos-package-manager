@@ -29,6 +29,8 @@ std::string path = pm.installPluginFile("/path/to/module.lgx", errorMsg, /*skipI
 
 // Scan installed packages (returns JSON array string)
 // Each entry includes all manifest.json fields + "installDir" + "mainFilePath"
+// For ui_qml packages, `view` is the required QML entry point and
+// `mainFilePath` is the optional backend plugin path.
 std::string modules = pm.getInstalledModules();      // type=core only
 std::string uiPlugins = pm.getInstalledUiPlugins();   // type=ui,ui_qml only
 std::string all = pm.getInstalledPackages();           // all types

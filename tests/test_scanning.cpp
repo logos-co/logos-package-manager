@@ -23,7 +23,9 @@ protected:
 
     // Create a fake installed module directory with manifest.json
     void createFakeModule(const std::string& name, const std::string& type,
-                          const std::string& version = "1.0.0") {
+                          const std::string& version = "1.0.0",
+                          const std::string& main = "default",
+                          const std::string& view = "") {
         fs::path moduleDir = tempDir / name;
         fs::create_directories(moduleDir);
 
@@ -33,7 +35,28 @@ protected:
         manifest["version"] = version;
         manifest["description"] = "Test module " + name;
         manifest["category"] = "test";
-        manifest["main"] = name + ".so";
+        if (type == "ui_qml" && main == "default") {
+            manifest["main"] = json::object();
+        } else if (main == "default") {
+            manifest["main"] = name + ".so";
+        } else if (!main.empty()) {
+            manifest["main"] = main;
+        } else if (type == "ui_qml") {
+            manifest["main"] = json::object();
+        }
+        if (!view.empty()) {
+            manifest["view"] = view;
+        }
+
+        if (type != "ui_qml" && main == "default") {
+            std::ofstream(moduleDir / (name + ".so")) << "binary";
+        } else if (!main.empty() && main != "default") {
+            std::ofstream(moduleDir / main) << "binary";
+        }
+        if (!view.empty()) {
+            fs::create_directories((moduleDir / fs::path(view)).parent_path());
+            std::ofstream(moduleDir / view) << "import QtQuick 2.15\nItem {}";
+        }
 
         std::ofstream mf(moduleDir / "manifest.json");
         mf << manifest.dump(2);
@@ -76,7 +99,7 @@ TEST_F(ScanningTest, GetInstalledModulesFiltersByCore) {
 TEST_F(ScanningTest, GetInstalledUiPluginsFiltersByUiTypes) {
     createFakeModule("core_mod", "core");
     createFakeModule("ui_mod", "ui");
-    createFakeModule("qml_mod", "ui_qml");
+    createFakeModule("qml_mod", "ui_qml", "1.0.0", "", "qml/Main.qml");
 
     PackageManagerLib pm;
     pm.setEmbeddedUiPluginsDirectory(tempDir.string());
@@ -95,7 +118,7 @@ TEST_F(ScanningTest, GetInstalledUiPluginsFiltersByUiTypes) {
 TEST_F(ScanningTest, GetInstalledPackagesReturnsAll) {
     createFakeModule("core_mod", "core");
     createFakeModule("ui_mod", "ui");
-    createFakeModule("qml_mod", "ui_qml");
+    createFakeModule("qml_mod", "ui_qml", "1.0.0", "", "qml/Main.qml");
 
     PackageManagerLib pm;
     pm.setEmbeddedModulesDirectory(tempDir.string());
@@ -121,6 +144,36 @@ TEST_F(ScanningTest, ScannedModulesContainManifestFields) {
     EXPECT_EQ(modules[0]["type"], "core");
     EXPECT_EQ(modules[0]["category"], "test");
     EXPECT_FALSE(modules[0]["installDir"].get<std::string>().empty());
+}
+
+TEST_F(ScanningTest, UiQmlScanKeepsViewAndAllowsEmptyMainFilePath) {
+    createFakeModule("qml_mod", "ui_qml", "1.0.0", "", "qml/Main.qml");
+
+    PackageManagerLib pm;
+    pm.setEmbeddedUiPluginsDirectory(tempDir.string());
+
+    std::string result = pm.getInstalledUiPlugins();
+    json plugins = json::parse(result);
+
+    ASSERT_EQ(plugins.size(), 1);
+    EXPECT_EQ(plugins[0]["name"], "qml_mod");
+    EXPECT_EQ(plugins[0]["view"], "qml/Main.qml");
+    EXPECT_TRUE(plugins[0]["mainFilePath"].get<std::string>().empty());
+}
+
+TEST_F(ScanningTest, UiQmlScanResolvesBackendMainFilePath) {
+    createFakeModule("qml_backend", "ui_qml", "1.0.0", "backend.so", "qml/Main.qml");
+
+    PackageManagerLib pm;
+    pm.setEmbeddedUiPluginsDirectory(tempDir.string());
+
+    std::string result = pm.getInstalledUiPlugins();
+    json plugins = json::parse(result);
+
+    ASSERT_EQ(plugins.size(), 1);
+    EXPECT_EQ(plugins[0]["name"], "qml_backend");
+    EXPECT_EQ(plugins[0]["view"], "qml/Main.qml");
+    EXPECT_NE(plugins[0]["mainFilePath"].get<std::string>().find("backend.so"), std::string::npos);
 }
 
 TEST_F(ScanningTest, MultipleDirectoriesCombined) {

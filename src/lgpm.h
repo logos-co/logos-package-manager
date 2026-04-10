@@ -58,7 +58,8 @@ LGPM_EXPORT void lgpm_set_user_ui_plugins_dir(lgpm_context_t ctx, const char* di
  * Install from local LGX file.
  * Returns installed directory path (caller frees with lgpm_free_string), or NULL on error.
  * If installed_plugin_path is non-NULL, it receives the full path to the installed main file
- * (caller frees with lgpm_free_string).
+ * (caller frees with lgpm_free_string). For ui_qml packages this is the optional
+ * backend plugin path only and may be empty.
  * If is_core_module is non-NULL, it receives whether the module type is "core".
  */
 LGPM_EXPORT char* lgpm_install_file(lgpm_context_t ctx, const char* lgx_path, bool skip_if_not_newer,
@@ -68,6 +69,8 @@ LGPM_EXPORT char* lgpm_install_file(lgpm_context_t ctx, const char* lgx_path, bo
  * Scan installed packages (all types).
  * Returns JSON string of installed packages array (caller frees with lgpm_free_string).
  * Each element contains all manifest.json fields + "installDir" + "mainFilePath".
+ * For ui_qml packages, `view` is the required QML entry point and
+ * `mainFilePath` is backend-only metadata that may be empty.
  */
 LGPM_EXPORT char* lgpm_scan_installed(lgpm_context_t ctx, const char** dirs, size_t num_dirs);
 
@@ -75,6 +78,8 @@ LGPM_EXPORT char* lgpm_scan_installed(lgpm_context_t ctx, const char** dirs, siz
  * Get installed core modules (type="core").
  * Returns JSON string array (caller frees with lgpm_free_string).
  * Each element contains all manifest.json fields + "installDir" + "mainFilePath".
+ * For ui_qml packages, `view` is the required QML entry point and
+ * `mainFilePath` is backend-only metadata that may be empty.
  */
 LGPM_EXPORT char* lgpm_get_installed_modules(lgpm_context_t ctx);
 
@@ -82,6 +87,8 @@ LGPM_EXPORT char* lgpm_get_installed_modules(lgpm_context_t ctx);
  * Get installed UI plugins (type="ui" or "ui_qml").
  * Returns JSON string array (caller frees with lgpm_free_string).
  * Each element contains all manifest.json fields + "installDir" + "mainFilePath".
+ * For ui_qml packages, `view` is the required QML entry point and
+ * `mainFilePath` is backend-only metadata that may be empty.
  */
 LGPM_EXPORT char* lgpm_get_installed_ui_plugins(lgpm_context_t ctx);
 

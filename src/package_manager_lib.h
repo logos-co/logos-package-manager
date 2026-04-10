@@ -51,7 +51,9 @@ public:
 
     // Install from local LGX file
     // Returns installed path, or empty string on error (sets errorMsg).
-    // If installedPluginPath is non-null, receives the full path to the installed main file.
+    // If installedPluginPath is non-null, receives the full path to the
+    // installed main file. For ui_qml packages this is the optional backend
+    // plugin path only and may be empty.
     // If isCoreModule is non-null, receives whether the module type is "core".
     std::string installPluginFile(const std::string& pluginPath, std::string& errorMsg,
                                   bool skipIfNotNewerVersion = false,
@@ -59,7 +61,9 @@ public:
                                   bool* isCoreModule = nullptr);
 
     // Module scanning — returns JSON string (array of module objects)
-    // Each object contains all manifest.json fields + "installDir" + "mainFilePath"
+    // Each object contains all manifest.json fields + "installDir" +
+    // "mainFilePath". For ui_qml packages, `view` is the required QML entry
+    // point and `mainFilePath` is backend-only metadata that may be empty.
     std::string getInstalledModules();
     std::string getInstalledUiPlugins();
     std::string getInstalledPackages();
