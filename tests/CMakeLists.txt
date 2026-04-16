@@ -4,7 +4,10 @@ add_executable(lgpm_tests
     test_version.cpp
     test_variant.cpp
     test_scanning.cpp
+    test_scan_dedup.cpp
     test_signature.cpp
+    test_dependency_resolution.cpp
+    test_uninstall.cpp
 )
 
 # Signature tests need lgx.h and liblgx

@@ -1,6 +1,8 @@
 #include "lgpm.h"
 #include "package_manager_lib.h"
+#include "package_manager_json.h"
 #include <cstring>
+#include <nlohmann/json.hpp>
 #include <string>
 #include <vector>
 
@@ -17,6 +19,45 @@ static char* to_c_string(const std::string& s) {
         memcpy(result, s.c_str(), s.size() + 1);
     }
     return result;
+}
+
+// Serialise a vector of structs through nlohmann's ADL to_json hooks in
+// package_manager_json.h. Kept in one place so every C-ABI accessor emits
+// the same JSON shape.
+template <typename T>
+static std::string structsToJsonString(const std::vector<T>& v) {
+    return nlohmann::json(v).dump();
+}
+
+// Project a vector of tree nodes to their .name field. Shared by the
+// recursive (tree->flatten()) and non-recursive (tree->children) cases.
+template <typename Node>
+static std::vector<std::string> nodeNames(const std::vector<Node>& nodes) {
+    std::vector<std::string> out;
+    out.reserve(nodes.size());
+    for (const auto& n : nodes) out.push_back(n.name);
+    return out;
+}
+
+// Flat name-only dependency walk used by lgpm_get_module_dependencies.
+// Wraps resolveDependencies so the library no longer ships a parallel
+// name-projecting API — the C ABI consumer gets its name list built here.
+static std::vector<std::string> dependenciesFlat(PackageManagerLib& lib,
+                                                 const std::string& name,
+                                                 bool recursive) {
+    auto tree = lib.resolveDependencies(name);
+    if (!tree) return {};
+    return nodeNames(recursive ? tree->flatten() : tree->children);
+}
+
+// Flat name-only reverse-edge walk used by lgpm_get_module_dependents.
+// Thin projection over resolveDependents.
+static std::vector<std::string> dependentsFlat(PackageManagerLib& lib,
+                                                const std::string& name,
+                                                bool recursive) {
+    auto tree = lib.resolveDependents(name);
+    if (!tree) return {};
+    return nodeNames(recursive ? tree->flatten() : tree->children);
 }
 
 struct lgpm_context_opaque {
@@ -95,18 +136,48 @@ char* lgpm_scan_installed(lgpm_context_t ctx, const char** dirs, size_t num_dirs
         return nullptr;
     }
     (void)dirs; (void)num_dirs;
-    std::string result = ctx->lib.getInstalledPackages();
-    return to_c_string(result);
+    return to_c_string(structsToJsonString(ctx->lib.getInstalledPackages()));
 }
 
 char* lgpm_get_installed_modules(lgpm_context_t ctx) {
     if (!ctx) { set_error("Invalid context"); return nullptr; }
-    return to_c_string(ctx->lib.getInstalledModules());
+    return to_c_string(structsToJsonString(ctx->lib.getInstalledModules()));
 }
 
 char* lgpm_get_installed_ui_plugins(lgpm_context_t ctx) {
     if (!ctx) { set_error("Invalid context"); return nullptr; }
-    return to_c_string(ctx->lib.getInstalledUiPlugins());
+    return to_c_string(structsToJsonString(ctx->lib.getInstalledUiPlugins()));
+}
+
+static const char** names_to_c_array(const std::vector<std::string>& names) {
+    const char** result = static_cast<const char**>(
+        malloc((names.size() + 1) * sizeof(const char*)));
+    if (!result) return nullptr;
+    for (size_t i = 0; i < names.size(); ++i) {
+        result[i] = to_c_string(names[i]);
+    }
+    result[names.size()] = nullptr;
+    return result;
+}
+
+const char** lgpm_get_module_dependencies(lgpm_context_t ctx,
+                                          const char* module_name,
+                                          bool recursive) {
+    if (!ctx || !module_name) {
+        set_error("Invalid arguments");
+        return nullptr;
+    }
+    return names_to_c_array(dependenciesFlat(ctx->lib, module_name, recursive));
+}
+
+const char** lgpm_get_module_dependents(lgpm_context_t ctx,
+                                        const char* module_name,
+                                        bool recursive) {
+    if (!ctx || !module_name) {
+        set_error("Invalid arguments");
+        return nullptr;
+    }
+    return names_to_c_array(dependentsFlat(ctx->lib, module_name, recursive));
 }
 
 void lgpm_set_signature_policy(lgpm_context_t ctx, const char* policy) {
