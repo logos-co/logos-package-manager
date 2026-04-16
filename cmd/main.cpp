@@ -1,13 +1,43 @@
+#include <filesystem>
 #include <iostream>
+#include <nlohmann/json.hpp>
 #include <string>
 #include <vector>
-#include <filesystem>
-#include <nlohmann/json.hpp>
+
 #include "package_manager_lib.h"
+#include "package_manager_json.h"
 
 namespace fs = std::filesystem;
 
 using json = nlohmann::json;
+
+// Flat-name projections over resolveDependencies / resolveDependents.
+// Mirror of the C ABI helpers in lgpm.cpp — the library no longer ships a
+// name-only API, so each CLI-adjacent binary derives the projection it
+// needs at the boundary.
+template <typename Node>
+static std::vector<std::string> nodeNames(const std::vector<Node>& nodes) {
+    std::vector<std::string> out;
+    out.reserve(nodes.size());
+    for (const auto& n : nodes) out.push_back(n.name);
+    return out;
+}
+
+static std::vector<std::string> dependenciesFlat(PackageManagerLib& pm,
+                                                 const std::string& name,
+                                                 bool recursive) {
+    auto tree = pm.resolveDependencies(name);
+    if (!tree) return {};
+    return nodeNames(recursive ? tree->flatten() : tree->children);
+}
+
+static std::vector<std::string> dependentsFlat(PackageManagerLib& pm,
+                                                const std::string& name,
+                                                bool recursive) {
+    auto tree = pm.resolveDependents(name);
+    if (!tree) return {};
+    return nodeNames(recursive ? tree->flatten() : tree->children);
+}
 
 // Parse "--key=value" or "--key value" style options.
 // Returns true and sets `value` if the arg matches the given key.
@@ -31,22 +61,25 @@ static void printHelp() {
               << "Usage: lgpm [options] <command> [arguments]\n"
               << "\n"
               << "Commands:\n"
-              << "  install --file <path>   Install from a local LGX file\n"
-              << "  install --dir <path>    Install all LGX files in a directory\n"
-              << "  list                    List installed packages\n"
-              << "  info <package>          Show installed package info\n"
+              << "  install --file <path>     Install from a local LGX file\n"
+              << "  install --dir <path>      Install all LGX files in a directory\n"
+              << "  list                      List installed packages\n"
+              << "  info <package>            Show installed package info\n"
+              << "  deps <package>            List modules that <package> depends on\n"
+              << "  dependents <package>      List modules that depend on <package>\n"
               << "\n"
               << "Options:\n"
-              << "  --modules-dir <path>    Set core modules directory\n"
-              << "  --ui-plugins-dir <path> Set UI plugins directory\n"
-              << "  --file <path>           LGX file path (for install command)\n"
-              << "  --dir <path>            Directory of LGX files (for install command)\n"
-              << "  --json                  Output in JSON format\n"
-              << "  --allow-unsigned        Accept unsigned packages without warning\n"
-              << "  --require-signatures    Reject unsigned packages\n"
-              << "  --keyring <path>        Override keyring directory\n"
-              << "  -h, --help              Show this help message\n"
-              << "  -v, --version           Show version information\n";
+              << "  --modules-dir <path>      Set core modules directory\n"
+              << "  --ui-plugins-dir <path>   Set UI plugins directory\n"
+              << "  --file <path>             LGX file path (for install command)\n"
+              << "  --dir <path>              Directory of LGX files (for install command)\n"
+              << "  --recursive, -r           For deps/dependents: walk the graph transitively\n"
+              << "  --json                    Output in JSON format\n"
+              << "  --allow-unsigned          Accept unsigned packages without warning\n"
+              << "  --require-signatures      Reject unsigned packages\n"
+              << "  --keyring <path>          Override keyring directory\n"
+              << "  -h, --help                Show this help message\n"
+              << "  -v, --version             Show version information\n";
 }
 
 static int cmdInstallFile(PackageManagerLib& pm, const std::string& filePath) {
@@ -109,22 +142,21 @@ static int cmdInstallDir(PackageManagerLib& pm, const std::string& dirPath) {
     return failures > 0 ? 1 : 0;
 }
 
-static void printInstalledTable(const json& modules) {
+static void printInstalledTable(const std::vector<InstalledPackage>& modules) {
     printf("%-30s %-15s %-10s %-15s\n", "NAME", "VERSION", "TYPE", "CATEGORY");
     std::cout << std::string(70, '-') << "\n";
 
     for (const auto& mod : modules) {
         printf("%-30s %-15s %-10s %-15s\n",
-               mod.value("name", "").c_str(),
-               mod.value("version", "").c_str(),
-               mod.value("type", "").c_str(),
-               mod.value("category", "").c_str());
+               mod.name.c_str(),
+               mod.version.c_str(),
+               mod.type.c_str(),
+               mod.category.c_str());
     }
 }
 
 static int cmdListInstalled(PackageManagerLib& pm, bool jsonOutput) {
-    std::string modulesJson = pm.getInstalledPackages();
-    json modules = json::parse(modulesJson);
+    auto modules = pm.getInstalledPackages();
 
     if (modules.empty() && pm.allDirectories().empty()) {
         std::cerr << "Error: no directories specified. Use --modules-dir and/or --ui-plugins-dir\n";
@@ -137,7 +169,7 @@ static int cmdListInstalled(PackageManagerLib& pm, bool jsonOutput) {
     }
 
     if (jsonOutput) {
-        std::cout << modules.dump(2) << "\n";
+        std::cout << json(modules).dump(2) << "\n";
     } else {
         std::cout << "Found " << modules.size() << " installed module(s):\n\n";
         printInstalledTable(modules);
@@ -146,40 +178,80 @@ static int cmdListInstalled(PackageManagerLib& pm, bool jsonOutput) {
     return 0;
 }
 
-static int cmdInfo(PackageManagerLib& pm, const std::string& packageName, bool jsonOutput) {
-    std::string modulesJson = pm.getInstalledPackages();
-    json modules = json::parse(modulesJson);
-
-    json found;
-    for (const auto& mod : modules) {
-        if (mod.value("name", "") == packageName) {
-            found = mod;
-            break;
-        }
-    }
-
-    if (found.is_null()) {
-        std::cerr << "Error: installed package '" << packageName << "' not found\n";
+static int cmdDeps(PackageManagerLib& pm, const std::string& packageName,
+                   bool recursive, bool jsonOutput) {
+    if (pm.allDirectories().empty()) {
+        std::cerr << "Error: no directories specified. Use --modules-dir and/or --ui-plugins-dir\n";
         return 1;
     }
 
-    if (jsonOutput) {
-        std::cout << found.dump(2) << "\n";
-    } else {
-        std::cout << "Name: " << found.value("name", "") << "\n";
-        std::cout << "Version: " << found.value("version", "") << "\n";
-        std::cout << "Description: " << found.value("description", "") << "\n";
-        std::cout << "Type: " << found.value("type", "") << "\n";
-        std::cout << "Category: " << found.value("category", "") << "\n";
-        std::cout << "Author: " << found.value("author", "") << "\n";
-        std::cout << "Directory: " << found.value("installDir", "") << "\n";
+    std::vector<std::string> deps = dependenciesFlat(pm, packageName, recursive);
 
-        if (found.contains("dependencies") && found["dependencies"].is_array() && !found["dependencies"].empty()) {
+    if (jsonOutput) {
+        std::cout << json(deps).dump(2) << "\n";
+        return 0;
+    }
+
+    if (deps.empty()) {
+        std::cout << "No " << (recursive ? "transitive " : "direct ")
+                  << "dependencies for '" << packageName << "'\n";
+        return 0;
+    }
+    for (const auto& n : deps) std::cout << n << "\n";
+    return 0;
+}
+
+static int cmdDependents(PackageManagerLib& pm, const std::string& packageName,
+                         bool recursive, bool jsonOutput) {
+    if (pm.allDirectories().empty()) {
+        std::cerr << "Error: no directories specified. Use --modules-dir and/or --ui-plugins-dir\n";
+        return 1;
+    }
+
+    std::vector<std::string> dependents = dependentsFlat(pm, packageName, recursive);
+
+    if (jsonOutput) {
+        std::cout << json(dependents).dump(2) << "\n";
+        return 0;
+    }
+
+    if (dependents.empty()) {
+        std::cout << "No " << (recursive ? "transitive " : "direct ")
+                  << "dependents of '" << packageName << "'\n";
+        return 0;
+    }
+    for (const auto& n : dependents) std::cout << n << "\n";
+    return 0;
+}
+
+static int cmdInfo(PackageManagerLib& pm, const std::string& packageName, bool jsonOutput) {
+    auto modules = pm.getInstalledPackages();
+
+    auto it = std::find_if(modules.begin(), modules.end(),
+                            [&](const InstalledPackage& p) { return p.name == packageName; });
+    if (it == modules.end()) {
+        std::cerr << "Error: installed package '" << packageName << "' not found\n";
+        return 1;
+    }
+    const InstalledPackage& found = *it;
+
+    if (jsonOutput) {
+        std::cout << json(found).dump(2) << "\n";
+    } else {
+        std::cout << "Name: " << found.name << "\n";
+        std::cout << "Version: " << found.version << "\n";
+        std::cout << "Description: " << found.description << "\n";
+        std::cout << "Type: " << found.type << "\n";
+        std::cout << "Category: " << found.category << "\n";
+        std::cout << "Author: " << found.author << "\n";
+        std::cout << "Directory: " << found.installDir << "\n";
+
+        if (!found.dependencies.empty()) {
             std::cout << "Dependencies: ";
             bool first = true;
-            for (const auto& d : found["dependencies"]) {
+            for (const auto& d : found.dependencies) {
                 if (!first) std::cout << ", ";
-                std::cout << d.get<std::string>();
+                std::cout << d;
                 first = false;
             }
             std::cout << "\n";
@@ -199,6 +271,7 @@ int main(int argc, char* argv[]) {
     bool jsonOutput = false;
     bool allowUnsigned = false;
     bool requireSignatures = false;
+    bool recursive = false;
     for (size_t i = 0; i < args.size(); ++i) {
         if (args[i] == "-h" || args[i] == "--help") {
             printHelp();
@@ -217,6 +290,8 @@ int main(int argc, char* argv[]) {
             allowUnsigned = true;
         } else if (args[i] == "--require-signatures") {
             requireSignatures = true;
+        } else if (args[i] == "--recursive" || args[i] == "-r") {
+            recursive = true;
         } else {
             positionalArgs.push_back(args[i]);
         }
@@ -263,6 +338,18 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         return cmdInfo(pm, positionalArgs[0], jsonOutput);
+    } else if (command == "deps") {
+        if (positionalArgs.empty()) {
+            std::cerr << "Error: deps requires a package name\n";
+            return 1;
+        }
+        return cmdDeps(pm, positionalArgs[0], recursive, jsonOutput);
+    } else if (command == "dependents") {
+        if (positionalArgs.empty()) {
+            std::cerr << "Error: dependents requires a package name\n";
+            return 1;
+        }
+        return cmdDependents(pm, positionalArgs[0], recursive, jsonOutput);
     } else {
         std::cerr << "Error: unknown command '" << command << "'\n";
         std::cerr << "Run 'lgpm --help' for usage information\n";

@@ -92,6 +92,31 @@ LGPM_EXPORT char* lgpm_get_installed_modules(lgpm_context_t ctx);
  */
 LGPM_EXPORT char* lgpm_get_installed_ui_plugins(lgpm_context_t ctx);
 
+/**
+ * Return the modules that `module_name` depends on (forward edges).
+ * If `recursive` is true, walks the forward dependency graph transitively
+ * via BFS; the module itself is never included. Unknown/uninstalled names
+ * yield an empty array (just a trailing NULL).
+ *
+ * Returns a null-terminated array of module names. Caller frees with
+ * lgpm_free_string_array. Returns NULL on invalid context / null name.
+ */
+LGPM_EXPORT const char** lgpm_get_module_dependencies(lgpm_context_t ctx,
+                                                      const char* module_name,
+                                                      bool recursive);
+
+/**
+ * Return the modules that depend on `module_name` (reverse edges).
+ * If `recursive` is true, walks the reverse dependency graph transitively
+ * via BFS. Unknown names yield an empty array (just a trailing NULL).
+ *
+ * Returns a null-terminated array of module names. Caller frees with
+ * lgpm_free_string_array. Returns NULL on invalid context / null name.
+ */
+LGPM_EXPORT const char** lgpm_get_module_dependents(lgpm_context_t ctx,
+                                                    const char* module_name,
+                                                    bool recursive);
+
 /* Signature policy configuration */
 
 /**

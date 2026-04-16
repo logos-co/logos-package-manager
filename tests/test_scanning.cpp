@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "package_manager_lib.h"
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
@@ -67,9 +68,7 @@ TEST_F(ScanningTest, EmptyDirectoryReturnsEmptyArray) {
     PackageManagerLib pm;
     pm.setEmbeddedModulesDirectory(tempDir.string());
 
-    std::string result = pm.getInstalledModules();
-    json modules = json::parse(result);
-    EXPECT_TRUE(modules.is_array());
+    auto modules = pm.getInstalledModules();
     EXPECT_TRUE(modules.empty());
 }
 
@@ -77,8 +76,7 @@ TEST_F(ScanningTest, NonExistentDirectoryReturnsEmptyArray) {
     PackageManagerLib pm;
     pm.setEmbeddedModulesDirectory("/nonexistent/path");
 
-    std::string result = pm.getInstalledModules();
-    json modules = json::parse(result);
+    auto modules = pm.getInstalledModules();
     EXPECT_TRUE(modules.empty());
 }
 
@@ -89,11 +87,10 @@ TEST_F(ScanningTest, GetInstalledModulesFiltersByCore) {
     PackageManagerLib pm;
     pm.setEmbeddedModulesDirectory(tempDir.string());
 
-    std::string result = pm.getInstalledModules();
-    json modules = json::parse(result);
+    auto modules = pm.getInstalledModules();
 
-    ASSERT_EQ(modules.size(), 1);
-    EXPECT_EQ(modules[0]["name"], "core_mod");
+    ASSERT_EQ(modules.size(), 1u);
+    EXPECT_EQ(modules[0].name, "core_mod");
 }
 
 TEST_F(ScanningTest, GetInstalledUiPluginsFiltersByUiTypes) {
@@ -104,13 +101,12 @@ TEST_F(ScanningTest, GetInstalledUiPluginsFiltersByUiTypes) {
     PackageManagerLib pm;
     pm.setEmbeddedUiPluginsDirectory(tempDir.string());
 
-    std::string result = pm.getInstalledUiPlugins();
-    json plugins = json::parse(result);
+    auto plugins = pm.getInstalledUiPlugins();
 
-    ASSERT_EQ(plugins.size(), 2);
+    ASSERT_EQ(plugins.size(), 2u);
 
     std::vector<std::string> names;
-    for (const auto& p : plugins) names.push_back(p["name"]);
+    for (const auto& p : plugins) names.push_back(p.name);
     EXPECT_TRUE(std::find(names.begin(), names.end(), "ui_mod") != names.end());
     EXPECT_TRUE(std::find(names.begin(), names.end(), "qml_mod") != names.end());
 }
@@ -123,10 +119,8 @@ TEST_F(ScanningTest, GetInstalledPackagesReturnsAll) {
     PackageManagerLib pm;
     pm.setEmbeddedModulesDirectory(tempDir.string());
 
-    std::string result = pm.getInstalledPackages();
-    json packages = json::parse(result);
-
-    EXPECT_EQ(packages.size(), 3);
+    auto packages = pm.getInstalledPackages();
+    EXPECT_EQ(packages.size(), 3u);
 }
 
 TEST_F(ScanningTest, ScannedModulesContainManifestFields) {
@@ -135,15 +129,14 @@ TEST_F(ScanningTest, ScannedModulesContainManifestFields) {
     PackageManagerLib pm;
     pm.setEmbeddedModulesDirectory(tempDir.string());
 
-    std::string result = pm.getInstalledModules();
-    json modules = json::parse(result);
+    auto modules = pm.getInstalledModules();
 
-    ASSERT_EQ(modules.size(), 1);
-    EXPECT_EQ(modules[0]["name"], "test_mod");
-    EXPECT_EQ(modules[0]["version"], "2.1.0");
-    EXPECT_EQ(modules[0]["type"], "core");
-    EXPECT_EQ(modules[0]["category"], "test");
-    EXPECT_FALSE(modules[0]["installDir"].get<std::string>().empty());
+    ASSERT_EQ(modules.size(), 1u);
+    EXPECT_EQ(modules[0].name, "test_mod");
+    EXPECT_EQ(modules[0].version, "2.1.0");
+    EXPECT_EQ(modules[0].type, "core");
+    EXPECT_EQ(modules[0].category, "test");
+    EXPECT_FALSE(modules[0].installDir.empty());
 }
 
 TEST_F(ScanningTest, UiQmlScanKeepsViewAndAllowsEmptyMainFilePath) {
@@ -152,13 +145,12 @@ TEST_F(ScanningTest, UiQmlScanKeepsViewAndAllowsEmptyMainFilePath) {
     PackageManagerLib pm;
     pm.setEmbeddedUiPluginsDirectory(tempDir.string());
 
-    std::string result = pm.getInstalledUiPlugins();
-    json plugins = json::parse(result);
+    auto plugins = pm.getInstalledUiPlugins();
 
-    ASSERT_EQ(plugins.size(), 1);
-    EXPECT_EQ(plugins[0]["name"], "qml_mod");
-    EXPECT_EQ(plugins[0]["view"], "qml/Main.qml");
-    EXPECT_TRUE(plugins[0]["mainFilePath"].get<std::string>().empty());
+    ASSERT_EQ(plugins.size(), 1u);
+    EXPECT_EQ(plugins[0].name, "qml_mod");
+    EXPECT_EQ(plugins[0].view, "qml/Main.qml");
+    EXPECT_TRUE(plugins[0].mainFilePath.empty());
 }
 
 TEST_F(ScanningTest, UiQmlScanResolvesBackendMainFilePath) {
@@ -167,13 +159,12 @@ TEST_F(ScanningTest, UiQmlScanResolvesBackendMainFilePath) {
     PackageManagerLib pm;
     pm.setEmbeddedUiPluginsDirectory(tempDir.string());
 
-    std::string result = pm.getInstalledUiPlugins();
-    json plugins = json::parse(result);
+    auto plugins = pm.getInstalledUiPlugins();
 
-    ASSERT_EQ(plugins.size(), 1);
-    EXPECT_EQ(plugins[0]["name"], "qml_backend");
-    EXPECT_EQ(plugins[0]["view"], "qml/Main.qml");
-    EXPECT_NE(plugins[0]["mainFilePath"].get<std::string>().find("backend.so"), std::string::npos);
+    ASSERT_EQ(plugins.size(), 1u);
+    EXPECT_EQ(plugins[0].name, "qml_backend");
+    EXPECT_EQ(plugins[0].view, "qml/Main.qml");
+    EXPECT_NE(plugins[0].mainFilePath.find("backend.so"), std::string::npos);
 }
 
 TEST_F(ScanningTest, MultipleDirectoriesCombined) {
@@ -198,10 +189,8 @@ TEST_F(ScanningTest, MultipleDirectoriesCombined) {
     pm.setEmbeddedModulesDirectory(tempDir.string());
     pm.setUserModulesDirectory(dir2.string());
 
-    std::string result = pm.getInstalledModules();
-    json modules = json::parse(result);
-
-    EXPECT_EQ(modules.size(), 2);
+    auto modules = pm.getInstalledModules();
+    EXPECT_EQ(modules.size(), 2u);
 
     std::error_code ec;
     fs::remove_all(dir2, ec);
@@ -221,13 +210,13 @@ TEST_F(ScanningTest, DirectoryManagement) {
     EXPECT_EQ(pm.userUiPluginsDirectory(), "/d");
 
     auto moduleDirs = pm.allModulesDirectories();
-    EXPECT_EQ(moduleDirs.size(), 2);
+    EXPECT_EQ(moduleDirs.size(), 2u);
 
     auto uiDirs = pm.allUiPluginsDirectories();
-    EXPECT_EQ(uiDirs.size(), 2);
+    EXPECT_EQ(uiDirs.size(), 2u);
 
     auto allDirs = pm.allDirectories();
-    EXPECT_EQ(allDirs.size(), 4);
+    EXPECT_EQ(allDirs.size(), 4u);
 }
 
 TEST_F(ScanningTest, MultipleEmbeddedDirectories) {
@@ -238,14 +227,14 @@ TEST_F(ScanningTest, MultipleEmbeddedDirectories) {
     pm.addEmbeddedModulesDirectory("/c");
 
     auto dirs = pm.embeddedModulesDirectories();
-    ASSERT_EQ(dirs.size(), 3);
+    ASSERT_EQ(dirs.size(), 3u);
     EXPECT_EQ(dirs[0], "/a");
     EXPECT_EQ(dirs[1], "/b");
     EXPECT_EQ(dirs[2], "/c");
 
     // set clears previous entries
     pm.setEmbeddedModulesDirectory("/x");
-    EXPECT_EQ(pm.embeddedModulesDirectories().size(), 1);
+    EXPECT_EQ(pm.embeddedModulesDirectories().size(), 1u);
     EXPECT_EQ(pm.embeddedModulesDirectories()[0], "/x");
 }
 
@@ -256,7 +245,7 @@ TEST_F(ScanningTest, MultipleEmbeddedUiPluginsDirectories) {
     pm.addEmbeddedUiPluginsDirectory("/p2");
 
     auto dirs = pm.embeddedUiPluginsDirectories();
-    ASSERT_EQ(dirs.size(), 2);
+    ASSERT_EQ(dirs.size(), 2u);
     EXPECT_EQ(dirs[0], "/p1");
     EXPECT_EQ(dirs[1], "/p2");
 }
@@ -283,10 +272,8 @@ TEST_F(ScanningTest, MultipleEmbeddedDirsScanning) {
     pm.setEmbeddedModulesDirectory(tempDir.string());
     pm.addEmbeddedModulesDirectory(dir2.string());
 
-    std::string result = pm.getInstalledModules();
-    json modules = json::parse(result);
-
-    EXPECT_EQ(modules.size(), 2);
+    auto modules = pm.getInstalledModules();
+    EXPECT_EQ(modules.size(), 2u);
 
     std::error_code ec;
     fs::remove_all(dir2, ec);
@@ -298,7 +285,6 @@ TEST_F(ScanningTest, SkipSubdirWithoutManifest) {
     PackageManagerLib pm;
     pm.setEmbeddedModulesDirectory(tempDir.string());
 
-    std::string result = pm.getInstalledPackages();
-    json packages = json::parse(result);
+    auto packages = pm.getInstalledPackages();
     EXPECT_TRUE(packages.empty());
 }

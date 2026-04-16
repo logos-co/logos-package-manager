@@ -27,13 +27,42 @@ std::string installedPath = pm.installPluginFile("/path/to/module.lgx", errorMsg
 // skipIfNotNewer: skip installation if an equal-or-newer version is already installed
 std::string path = pm.installPluginFile("/path/to/module.lgx", errorMsg, /*skipIfNotNewer=*/true);
 
-// Scan installed packages (returns JSON array string)
-// Each entry includes all manifest.json fields + "installDir" + "mainFilePath"
-// For ui_qml packages, `view` is the required QML entry point and
-// `mainFilePath` is the optional backend plugin path.
-std::string modules = pm.getInstalledModules();      // type=core only
-std::string uiPlugins = pm.getInstalledUiPlugins();   // type=ui,ui_qml only
-std::string all = pm.getInstalledPackages();           // all types
+// Scan installed packages (returns struct vectors)
+// Each InstalledPackage carries all manifest.json fields plus installDir,
+// mainFilePath, installType, and a nested Hashes struct. For ui_qml packages,
+// `view` is the required QML entry point and `mainFilePath` is the optional
+// backend plugin path.
+std::vector<InstalledPackage> modules   = pm.getInstalledModules();     // type=core only
+std::vector<InstalledPackage> uiPlugins = pm.getInstalledUiPlugins();   // type=ui,ui_qml only
+std::vector<InstalledPackage> all       = pm.getInstalledPackages();    // all types
+
+// Direct dependencies are already on InstalledPackage::dependencies; the
+// library does not ship a parallel name-only API. Callers that want a flat
+// transitive list build it over resolveDependencies / resolveDependents
+// (see the `lgpm` CLI `deps` / `dependents` subcommands for a reference
+// implementation — ~15 lines of BFS with a seen-set).
+
+// Dependency graph as a rich struct tree. Returns std::nullopt when the
+// package is not installed. Children with status == NotInstalled are
+// leaves; Cycle marks a back-edge during the walk.
+std::optional<DependencyTreeNode> tree = pm.resolveDependencies("waku_module");
+
+// Reverse-edge tree, rooted at the queried package. `children` are the
+// direct reverse neighbours; their `children` are transitive ones.
+// Returns std::nullopt when the package is not installed.
+std::optional<DependentTreeNode> users = pm.resolveDependents("waku_module");
+
+// Both tree types ship a BFS-with-dedup `flatten()` — handy for callers
+// that only want "every unique descendant", no tree shape.
+if (tree)  std::vector<DependencyTreeNode> allDeps   = tree->flatten();
+if (users) std::vector<DependentTreeNode>  allUsers  = users->flatten();
+
+// JSON serialization lives in a separate header (opt-in; the core lib
+// header does not pull in nlohmann::json). nlohmann ADL `to_json` hooks
+// are provided for every struct above.
+#include <package_manager_json.h>
+#include <nlohmann/json.hpp>
+std::string modulesJson = nlohmann::json(modules).dump(2);
 
 // Platform variant helpers
 std::string variant = PackageManagerLib::currentPlatformVariant();     // e.g. "darwin-arm64"
@@ -76,6 +105,19 @@ lgpm_set_keyring_path(ctx, "/path/to/trusted-keys");
 
 char* result = lgpm_install_file(ctx, "/path/to/module.lgx", false, NULL, NULL);
 lgpm_free_string(result);
+
+// Flat name-only dependency queries (mirror liblogos' logos_core_get_module_*).
+// Null-terminated array; caller frees with lgpm_free_string_array.
+const char** deps       = lgpm_get_module_dependencies(ctx, "waku_module", false);
+const char** allDeps    = lgpm_get_module_dependencies(ctx, "waku_module", true);
+const char** dependents = lgpm_get_module_dependents(ctx, "waku_module", false);
+const char** allUsers   = lgpm_get_module_dependents(ctx, "waku_module", true);
+for (size_t i = 0; deps[i]; ++i) printf("%s\n", deps[i]);
+lgpm_free_string_array(deps);
+lgpm_free_string_array(allDeps);
+lgpm_free_string_array(dependents);
+lgpm_free_string_array(allUsers);
+
 lgpm_free(ctx);
 ```
 
@@ -89,10 +131,13 @@ Commands:
   install --dir <path>        Install all LGX files in a directory
   list                        List installed packages
   info <package>              Show installed package details
+  deps <package>              List packages that <package> depends on
+  dependents <package>        List installed packages that depend on <package>
 
 Options:
   --modules-dir <path>        Target directory for core modules
   --ui-plugins-dir <path>     Target directory for UI plugins
+  --recursive, -r             For deps/dependents: walk the graph transitively
   --json                      Output in JSON format
   --allow-unsigned            Accept unsigned packages without warning
   --require-signatures        Reject unsigned packages and untrusted signers
@@ -115,6 +160,14 @@ lgpm --modules-dir ./modules --ui-plugins-dir ./plugins list
 
 # Show package info (JSON)
 lgpm --modules-dir ./modules info waku_module --json
+
+# What does waku_module depend on? (one name per line)
+lgpm --modules-dir ./modules deps waku_module
+lgpm --modules-dir ./modules deps waku_module --recursive
+
+# What depends on waku_module?
+lgpm --modules-dir ./modules --ui-plugins-dir ./plugins dependents waku_module
+lgpm --modules-dir ./modules --ui-plugins-dir ./plugins dependents waku_module -r --json
 ```
 
 ## Building

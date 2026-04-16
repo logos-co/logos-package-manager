@@ -28,6 +28,8 @@ message(STATUS "Using lgx library at: ${LGX_ROOT}")
 set(LIB_SOURCES
     src/package_manager_lib.cpp
     src/package_manager_lib.h
+    src/package_manager_json.cpp
+    src/package_manager_json.h
     src/lgpm.cpp
     src/lgpm.h
 )
@@ -125,6 +127,6 @@ install(TARGETS package_manager_lib
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 
-install(FILES src/package_manager_lib.h src/lgpm.h
+install(FILES src/package_manager_lib.h src/package_manager_json.h src/lgpm.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )

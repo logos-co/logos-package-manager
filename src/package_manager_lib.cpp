@@ -7,6 +7,11 @@
 #include <cstdlib>
 #include <random>
 #include <iostream>
+#include <map>
+#include <set>
+#include <deque>
+#include <unordered_map>
+#include <unordered_set>
 #include <nlohmann/json.hpp>
 #include "lgx.h"
 
@@ -21,6 +26,23 @@ static std::vector<std::string> splitString(const std::string& s, char delim) {
         parts.push_back(token);
     }
     return parts;
+}
+
+const char* installTypeToString(InstallType t) {
+    switch (t) {
+        case InstallType::Embedded: return "embedded";
+        case InstallType::User:     return "user";
+    }
+    return "";
+}
+
+const char* dependencyStatusToString(DependencyStatus s) {
+    switch (s) {
+        case DependencyStatus::Installed:    return "installed";
+        case DependencyStatus::NotInstalled: return "not_installed";
+        case DependencyStatus::Cycle:        return "cycle";
+    }
+    return "";
 }
 
 bool PackageManagerLib::versionGreaterOrEqual(const std::string& a, const std::string& b)
@@ -321,22 +343,71 @@ std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, 
     return installDir;
 }
 
-// Shared scanning logic — scans directories for installed packages matching given types.
-// Returns JSON array; each element is a copy of manifest.json + "installDir" +
-// "mainFilePath". For ui_qml packages, mainFilePath refers only to the optional
-// backend plugin and may be empty.
-static std::string scanInstalledByTypes(const std::vector<std::string>& dirs,
-                                         const std::vector<std::string>& types)
+namespace {
+
+// Enriched scan record. `installType` tracks whether the winning copy lives
+// in an embedded (shipped, read-only) directory or a user-writable one.
+struct ScanEntry {
+    std::string name;
+    std::string type;
+    std::string version;
+    std::string installDir;
+    std::string mainFilePath;
+    InstallType installType = InstallType::User;
+    std::vector<std::string> dependencies;
+    json manifest;  // full manifest.json — used to emit the JSON passthrough
+};
+
+static std::string resolveMainFilePath(const json& manifest,
+                                       const fs::path& moduleDir,
+                                       const std::vector<std::string>& variants)
 {
-    json results = json::array();
+    if (!manifest.contains("main"))
+        return {};
+
+    if (manifest["main"].is_object()) {
+        const auto& mainObj = manifest["main"];
+        for (const auto& variant : variants) {
+            if (mainObj.contains(variant)) {
+                std::string mainFile = mainObj[variant].get<std::string>();
+                if (!mainFile.empty()) {
+                    fs::path candidate = moduleDir / mainFile;
+                    return fs::exists(candidate) ? candidate.string() : std::string{};
+                }
+            }
+        }
+        return {};
+    }
+    if (manifest["main"].is_string()) {
+        std::string mainFile = manifest["main"].get<std::string>();
+        if (mainFile.empty())
+            return {};
+        fs::path candidate = moduleDir / mainFile;
+        return fs::exists(candidate) ? candidate.string() : std::string{};
+    }
+    return {};
+}
+
+// Enumerate all manifests under the given embedded + user dir lists,
+// deduping by package name with user-dir entries winning over embedded ones.
+// `types` filter selects by manifest.type; empty = no filter.
+static std::map<std::string, ScanEntry> enumerateManifests(
+    const std::vector<std::string>& embeddedDirs,
+    const std::vector<std::string>& userDirs,
+    const std::vector<std::string>& types)
+{
+    std::map<std::string, ScanEntry> byName;
     auto variants = PackageManagerLib::platformVariantsToTry();
 
-    for (const auto& dirPath : dirs) {
+    auto scanOne = [&](const std::string& dirPath, InstallType installType) {
         std::error_code dirEc;
         if (!fs::is_directory(dirPath, dirEc) || dirEc)
-            continue;
+            return;
 
-        for (const auto& entry : fs::directory_iterator(dirPath, fs::directory_options::skip_permission_denied, dirEc)) {
+        for (const auto& entry : fs::directory_iterator(
+                 dirPath,
+                 fs::directory_options::skip_permission_denied,
+                 dirEc)) {
             if (dirEc) break;
             std::error_code entryEc;
             if (!entry.is_directory(entryEc) || entryEc)
@@ -357,9 +428,12 @@ static std::string scanInstalledByTypes(const std::vector<std::string>& dirs,
             if (!manifest.is_object())
                 continue;
 
-            // Filter by type if types list is non-empty
+            std::string name = manifest.value("name", "");
+            if (name.empty())
+                continue;
+
+            std::string moduleType = manifest.value("type", "");
             if (!types.empty()) {
-                std::string moduleType = manifest.value("type", "");
                 bool matches = false;
                 for (const auto& t : types) {
                     if (moduleType == t) { matches = true; break; }
@@ -367,60 +441,349 @@ static std::string scanInstalledByTypes(const std::vector<std::string>& dirs,
                 if (!matches) continue;
             }
 
-            // Resolve mainFilePath from the "main" field. For ui_qml, this is
-            // backend-only metadata and may legitimately be empty.
-            std::string mainFilePath;
-            if (manifest.contains("main")) {
-                if (manifest["main"].is_object()) {
-                    auto mainObj = manifest["main"];
-                    for (const auto& variant : variants) {
-                        if (mainObj.contains(variant)) {
-                            std::string mainFile = mainObj[variant].get<std::string>();
-                            if (!mainFile.empty()) {
-                                fs::path candidate = entry.path() / mainFile;
-                                if (fs::exists(candidate)) {
-                                    mainFilePath = candidate.string();
-                                }
-                                break;
-                            }
-                        }
-                    }
-                } else if (manifest["main"].is_string()) {
-                    std::string mainFile = manifest["main"].get<std::string>();
-                    if (!mainFile.empty()) {
-                        fs::path candidate = entry.path() / mainFile;
-                        if (fs::exists(candidate)) {
-                            mainFilePath = candidate.string();
-                        }
+            // User always wins — later scans for the same name clobber earlier ones.
+            // Since we scan embedded first, then user, the map ends with the correct entry.
+            ScanEntry scan;
+            scan.name = name;
+            scan.type = moduleType;
+            scan.version = manifest.value("version", "");
+            scan.installDir = entry.path().string();
+            scan.installType = installType;
+            scan.mainFilePath = resolveMainFilePath(manifest, entry.path(), variants);
+
+            if (manifest.contains("dependencies") && manifest["dependencies"].is_array()) {
+                for (const auto& d : manifest["dependencies"]) {
+                    if (d.is_string()) {
+                        std::string depName = d.get<std::string>();
+                        if (!depName.empty())
+                            scan.dependencies.push_back(depName);
                     }
                 }
             }
+            scan.manifest = std::move(manifest);
 
-            // Start with a copy of all manifest fields
-            json info = manifest;
-            info["installDir"] = entry.path().string();
-            info["mainFilePath"] = mainFilePath;
+            byName[name] = std::move(scan);
+        }
+    };
 
-            results.push_back(info);
+    for (const auto& d : embeddedDirs) scanOne(d, InstallType::Embedded);
+    for (const auto& d : userDirs)     scanOne(d, InstallType::User);
+
+    return byName;
+}
+
+// Materialise a struct from a scan. Reads the manifest fields that
+// downstream consumers actually use (field-use audit: name, version,
+// description, type, category, author, license, icon, view, dependencies,
+// hashes.root); the synthesised installDir / mainFilePath / installType
+// come straight from the scan result. Missing fields default to empty —
+// the manifest is already partially validated by enumerateManifests so
+// name / type / version are present in any well-formed entry.
+static InstalledPackage scanToInstalledPackage(const ScanEntry& scan)
+{
+    InstalledPackage p;
+    p.name        = scan.name;
+    p.version     = scan.version;
+    p.type        = scan.type;
+    p.installType = scan.installType;
+    p.installDir  = scan.installDir;
+    p.mainFilePath = scan.mainFilePath;
+    p.dependencies = scan.dependencies;
+
+    const json& m = scan.manifest;
+    p.description = m.value("description", "");
+    p.category    = m.value("category", "");
+    p.author      = m.value("author", "");
+    p.license     = m.value("license", "");
+    p.icon        = m.value("icon", "");
+    p.view        = m.value("view", "");
+
+    if (m.contains("hashes") && m["hashes"].is_object()) {
+        p.hashes.root = m["hashes"].value("root", "");
+    }
+
+    return p;
+}
+
+static std::vector<InstalledPackage> scansToInstalledPackages(
+    const std::map<std::string, ScanEntry>& byName)
+{
+    std::vector<InstalledPackage> out;
+    out.reserve(byName.size());
+    for (const auto& [name, scan] : byName) {
+        out.push_back(scanToInstalledPackage(scan));
+    }
+    return out;
+}
+
+} // namespace
+
+std::vector<InstalledPackage> PackageManagerLib::getInstalledModules()
+{
+    auto byName = enumerateManifests(m_embeddedModulesDirs,
+                                     m_userModulesDir.empty() ? std::vector<std::string>{}
+                                                              : std::vector<std::string>{m_userModulesDir},
+                                     {"core"});
+    return scansToInstalledPackages(byName);
+}
+
+std::vector<InstalledPackage> PackageManagerLib::getInstalledUiPlugins()
+{
+    auto byName = enumerateManifests(m_embeddedUiPluginsDirs,
+                                     m_userUiPluginsDir.empty() ? std::vector<std::string>{}
+                                                                : std::vector<std::string>{m_userUiPluginsDir},
+                                     {"ui", "ui_qml"});
+    return scansToInstalledPackages(byName);
+}
+
+std::vector<InstalledPackage> PackageManagerLib::getInstalledPackages()
+{
+    std::vector<std::string> embeddedDirs = m_embeddedModulesDirs;
+    embeddedDirs.insert(embeddedDirs.end(),
+                        m_embeddedUiPluginsDirs.begin(), m_embeddedUiPluginsDirs.end());
+    std::vector<std::string> userDirs;
+    if (!m_userModulesDir.empty())   userDirs.push_back(m_userModulesDir);
+    if (!m_userUiPluginsDir.empty()) userDirs.push_back(m_userUiPluginsDir);
+
+    auto byName = enumerateManifests(embeddedDirs, userDirs, {});
+    return scansToInstalledPackages(byName);
+}
+
+// Helper — enumerate every installed package across all four directory
+// categories. Used for cross-category dependency resolution.
+static std::map<std::string, ScanEntry> enumerateAllForResolve(
+    const std::vector<std::string>& embeddedModulesDirs,
+    const std::string& userModulesDir,
+    const std::vector<std::string>& embeddedUiPluginsDirs,
+    const std::string& userUiPluginsDir)
+{
+    std::vector<std::string> embedded = embeddedModulesDirs;
+    embedded.insert(embedded.end(), embeddedUiPluginsDirs.begin(), embeddedUiPluginsDirs.end());
+    std::vector<std::string> users;
+    if (!userModulesDir.empty())   users.push_back(userModulesDir);
+    if (!userUiPluginsDir.empty()) users.push_back(userUiPluginsDir);
+    return enumerateManifests(embedded, users, {});
+}
+
+std::optional<DependencyTreeNode> PackageManagerLib::resolveDependencies(const std::string& packageName)
+{
+    auto byName = enumerateAllForResolve(m_embeddedModulesDirs, m_userModulesDir,
+                                         m_embeddedUiPluginsDirs, m_userUiPluginsDir);
+
+    if (byName.find(packageName) == byName.end())
+        return std::nullopt;
+
+    // Recursive walk. Visited-on-path set for cycle detection; the tree is
+    // expanded across different branches (diamond shapes) but a cycle
+    // through a single branch produces a Cycle leaf to stop descent.
+    std::set<std::string> path;
+    std::function<DependencyTreeNode(const std::string&)> build = [&](const std::string& name) -> DependencyTreeNode {
+        DependencyTreeNode node;
+        node.name = name;
+
+        if (path.count(name)) {
+            node.status = DependencyStatus::Cycle;
+            return node;
+        }
+
+        auto it = byName.find(name);
+        if (it == byName.end()) {
+            node.status = DependencyStatus::NotInstalled;
+            return node;
+        }
+
+        const auto& scan = it->second;
+        node.status      = DependencyStatus::Installed;
+        node.version     = scan.version;
+        node.installType = scan.installType;
+
+        path.insert(name);
+        node.children.reserve(scan.dependencies.size());
+        for (const auto& dep : scan.dependencies) {
+            node.children.push_back(build(dep));
+        }
+        path.erase(name);
+        return node;
+    };
+
+    return build(packageName);
+}
+
+std::optional<DependentTreeNode> PackageManagerLib::resolveDependents(const std::string& packageName)
+{
+    auto byName = enumerateAllForResolve(m_embeddedModulesDirs, m_userModulesDir,
+                                         m_embeddedUiPluginsDirs, m_userUiPluginsDir);
+
+    // Only installed packages get rooted trees — matches resolveDependencies.
+    auto rootIt = byName.find(packageName);
+    if (rootIt == byName.end())
+        return std::nullopt;
+
+    // Reverse adjacency: name → [names that depend on it].
+    // Every manifest's dependencies[] entry must reference the canonical
+    // manifest.name of its target exactly — no normalization. Packages
+    // with incorrect dependency declarations are bugs in those packages.
+    std::unordered_map<std::string, std::vector<std::string>> reverseDeps;
+    for (const auto& [name, scan] : byName) {
+        for (const auto& d : scan.dependencies) {
+            reverseDeps[d].push_back(name);
         }
     }
 
-    return results.dump();
+    // Fill a node from its ScanEntry. Reverse edges are synthesised only
+    // from installed manifests, so every node reached during the walk is
+    // present in byName; no NotInstalled/Cycle status distinction needed.
+    auto fillFromScan = [](DependentTreeNode& node, const ScanEntry& scan) {
+        node.name        = scan.name;
+        node.version     = scan.version;
+        node.type        = scan.type;
+        node.installType = scan.installType;
+        node.installDir  = scan.installDir;
+    };
+
+    // Recursive build with on-path cycle detection. A cycle ends the
+    // descent silently (node without children) — there's no "Cycle"
+    // status to emit because the forward-tree's tri-state status field
+    // doesn't apply to reverse trees.
+    std::set<std::string> path;
+    std::function<DependentTreeNode(const std::string&)> build = [&](const std::string& name) -> DependentTreeNode {
+        DependentTreeNode node;
+        auto it = byName.find(name);
+        if (it != byName.end()) fillFromScan(node, it->second);
+        else                    node.name = name;   // unreachable in practice
+
+        if (path.count(name))
+            return node;
+
+        auto rit = reverseDeps.find(name);
+        if (rit == reverseDeps.end())
+            return node;
+
+        path.insert(name);
+        node.children.reserve(rit->second.size());
+        for (const auto& depender : rit->second) {
+            node.children.push_back(build(depender));
+        }
+        path.erase(name);
+        return node;
+    };
+
+    return build(packageName);
 }
 
-std::string PackageManagerLib::getInstalledModules()
+// ---------------------------------------------------------------------------
+// DependencyTreeNode::flatten / DependentTreeNode::flatten
+// ---------------------------------------------------------------------------
+// Both flavours share the same BFS-dedup shape. Kept as two hand-rolled
+// copies rather than a template — they walk different node types but are
+// each a ~15 line function, and templating would either require putting
+// the body in a header or a shared private helper whose generality
+// doesn't pay off at two call sites. Children vectors on the returned
+// copies are cleared so the flat output is canonical (no hidden
+// substructure, no double-counting under iteration).
+
+std::vector<DependencyTreeNode> DependencyTreeNode::flatten() const
 {
-    return scanInstalledByTypes(allModulesDirectories(), {"core"});
+    std::vector<DependencyTreeNode> out;
+    std::unordered_set<std::string> seen;
+    std::deque<const DependencyTreeNode*> queue;
+    for (const auto& c : children) queue.push_back(&c);
+    while (!queue.empty()) {
+        const DependencyTreeNode* n = queue.front();
+        queue.pop_front();
+        if (!seen.insert(n->name).second) continue;
+        DependencyTreeNode copy;
+        copy.name        = n->name;
+        copy.status      = n->status;
+        copy.version     = n->version;
+        copy.installType = n->installType;
+        out.push_back(std::move(copy));
+        for (const auto& c : n->children) queue.push_back(&c);
+    }
+    return out;
 }
 
-std::string PackageManagerLib::getInstalledUiPlugins()
+std::vector<DependentTreeNode> DependentTreeNode::flatten() const
 {
-    return scanInstalledByTypes(allUiPluginsDirectories(), {"ui", "ui_qml"});
+    std::vector<DependentTreeNode> out;
+    std::unordered_set<std::string> seen;
+    std::deque<const DependentTreeNode*> queue;
+    for (const auto& c : children) queue.push_back(&c);
+    while (!queue.empty()) {
+        const DependentTreeNode* n = queue.front();
+        queue.pop_front();
+        if (!seen.insert(n->name).second) continue;
+        DependentTreeNode copy;
+        copy.name        = n->name;
+        copy.version     = n->version;
+        copy.type        = n->type;
+        copy.installType = n->installType;
+        copy.installDir  = n->installDir;
+        out.push_back(std::move(copy));
+        for (const auto& c : n->children) queue.push_back(&c);
+    }
+    return out;
 }
 
-std::string PackageManagerLib::getInstalledPackages()
+UninstallResult PackageManagerLib::uninstallPackage(const std::string& packageName)
 {
-    return scanInstalledByTypes(allDirectories(), {});
+    UninstallResult result;
+
+    auto byName = enumerateAllForResolve(m_embeddedModulesDirs, m_userModulesDir,
+                                         m_embeddedUiPluginsDirs, m_userUiPluginsDir);
+    auto it = byName.find(packageName);
+    if (it == byName.end()) {
+        result.errorMsg = "Package not found: " + packageName;
+        return result;
+    }
+
+    const auto& scan = it->second;
+    if (scan.installType == InstallType::Embedded) {
+        result.errorMsg = "Cannot uninstall embedded package: " + packageName;
+        return result;
+    }
+    if (scan.installDir.empty()) {
+        result.errorMsg = "Package has no install directory: " + packageName;
+        return result;
+    }
+
+    std::error_code ec;
+    // Guard against anything weird happening with the resolved path: require
+    // that the directory lives under one of the configured user directories.
+    fs::path toDelete = fs::absolute(scan.installDir, ec);
+    if (ec || !fs::exists(toDelete, ec)) {
+        result.errorMsg = "Install directory missing: " + scan.installDir;
+        return result;
+    }
+    bool insideUserDir = false;
+    for (const auto* d : { &m_userModulesDir, &m_userUiPluginsDir }) {
+        if (d->empty()) continue;
+        std::error_code pec;
+        fs::path userRoot = fs::absolute(*d, pec);
+        if (pec) continue;
+        auto rel = fs::relative(toDelete, userRoot, pec);
+        if (pec) continue;
+        std::string rs = rel.string();
+        if (!rs.empty() && rs.rfind("..", 0) != 0) {
+            insideUserDir = true;
+            break;
+        }
+    }
+    if (!insideUserDir) {
+        result.errorMsg = "Refusing to uninstall path outside user directories: " + toDelete.string();
+        return result;
+    }
+
+    std::uintmax_t removed = fs::remove_all(toDelete, ec);
+    if (ec) {
+        result.errorMsg = "Failed to remove install directory: " + ec.message();
+        return result;
+    }
+
+    result.success = true;
+    result.removedFiles.push_back(toDelete.string());
+    (void)removed;
+    return result;
 }
 
 std::string PackageManagerLib::currentPlatformVariant()
