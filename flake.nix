@@ -16,7 +16,7 @@
         inherit system;
         pkgs = import nixpkgs { inherit system; };
         logosPackageLib = logos-package.packages.${system}.lib;
-        dirBundler = nix-bundle-dir.bundlers.${system}.default;
+        dirBundler = nix-bundle-dir.bundlers.${system}.permissive;
       });
     in
     {
