@@ -59,9 +59,9 @@
           cli-bundle-dir = dirBundler cliPortable;
         } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
           cli-appimage = nix-bundle-appimage.lib.${system}.mkAppImage {
-            drv = cli;
+            drv = cliPortable;
             name = "lgpm";
-            bundle = dirBundler cli;
+            bundle = dirBundler cliPortable;
             desktopFile = ./assets/lgpm.desktop;
             icon = ./assets/lgpm.png;
           };
