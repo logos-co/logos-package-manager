@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Logos Package Manager
+Exec=lgpm
+Icon=lgpm
+Terminal=true
+Categories=Utility;
