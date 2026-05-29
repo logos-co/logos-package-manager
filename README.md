@@ -170,12 +170,64 @@ lgpm --modules-dir ./modules --ui-plugins-dir ./plugins dependents waku_module
 lgpm --modules-dir ./modules --ui-plugins-dir ./plugins dependents waku_module -r --json
 ```
 
-## Building
+## How to Build
+
+### Using Nix (Recommended)
+
+The package manager ships as a C++ library plus the `lgpm` CLI. There are two flavors: a **dev** build for local iteration and a **portable** build for distribution. They differ in which `.lgx` platform variant the CLI selects when installing packages — the dev build picks the `-dev`-suffixed variant (e.g. `darwin-arm64-dev`), the portable build picks the plain one (e.g. `darwin-arm64`). Installing a package built for the wrong flavor fails with a variant-mismatch error.
+
+#### Dev Build
+
+A standard Nix derivation whose dependencies live in `/nix/store`. It is the fastest way to iterate during development but is **not portable** — it only runs on the machine that built it. It matches the local/dev `.lgx` packages produced by [`nix-bundle-lgx`](https://github.com/logos-co/nix-bundle-lgx) (the default, non-portable bundler).
 
 ```bash
-nix build                        # library + CLI
-nix build .#lib                  # library only
-nix build .#cli                  # CLI only
+nix build                        # library + CLI (combined, dev)
+nix build '.#lib'                # library only
+nix build '.#cli'                # CLI only
+./result/bin/lgpm --help
+```
+
+#### Portable Builds
+
+Portable builds select the plain platform variant, matching **portable** `.lgx` packages — releases from [logos-modules](https://github.com/logos-co/logos-modules), downloads via [logos-package-downloader](https://github.com/logos-co/logos-package-downloader), or bundles generated with `nix bundle --bundler github:logos-co/nix-bundle-lgx#portable ...`. The `cli-bundle-dir` and `cli-appimage` outputs go further and are **fully self-contained** — no `/nix/store` references at runtime — for distribution.
+
+| Output | Platform | Format |
+|---|---|---|
+| `cli-portable` / `lib-portable` | Linux, macOS | Nix derivation (portable variant selection) |
+| `cli-bundle-dir` | Linux, macOS | Self-contained flat directory with `bin/` and `lib/` |
+| `cli-appimage` | Linux | Single-file `.AppImage` executable |
+
+##### Portable Nix derivation (all platforms)
+```bash
+nix build '.#cli-portable'       # CLI only
+nix build '.#lib-portable'       # library only
+./result/bin/lgpm --help
+```
+
+##### Self-contained directory bundle (all platforms)
+```bash
+nix build '.#cli-bundle-dir'
+./result/bin/lgpm --help
+```
+
+##### Linux AppImage (Linux only)
+```bash
+nix build '.#cli-appimage'
+./result/lgpm.AppImage --help
+```
+
+#### Development Shell
+
+```bash
+nix develop
+```
+
+**Note:** In zsh, quote targets containing `#` to prevent glob expansion (e.g., `'.#cli'`).
+
+If you don't have flakes enabled globally:
+
+```bash
+nix build --extra-experimental-features 'nix-command flakes'
 ```
 
 ## Testing
