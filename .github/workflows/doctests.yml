@@ -55,9 +55,36 @@ jobs:
           name: logos-co
           authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
 
+      # Resolve the commit under test. For pull requests this is the PR's head
+      # commit (not the synthetic merge commit); for pushes it's the pushed
+      # commit. Passed to --release-for below so the doc-tests build THIS commit
+      # of logos-package-manager instead of the latest published flake.
+      #
+      # Fork PRs are the exception: their head commit lives in the fork, not in
+      # logos-co/logos-package-manager, so nix could not fetch
+      # `github:logos-co/logos-package-manager/<sha>`. We blank the SHA for forks
+      # (--release-for repo= → pins that repo to latest), so the doc-tests still
+      # run for fork PRs, just against master as before.
+      - name: Resolve commit under test
+        id: commit
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ] && \
+             [ "${{ github.event.pull_request.head.repo.fork }}" = "true" ]; then
+            echo "sha=" >> "$GITHUB_OUTPUT"
+            echo "Fork PR detected — doc-tests will run against latest master."
+          else
+            echo "sha=${{ github.event.pull_request.head.sha || github.sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
       # The runner is the shared `doctest` CLI, invoked directly via its flake
       # (github:logos-co/logos-doctest). The flake bundles Python + PyYAML, so no
       # pip install step is needed. Each spec gets its own HTML report.
+      #
+      # --release-for pins the {release} placeholder for this one repo to the
+      # commit under test, so `github:logos-co/logos-package-manager{release}` in
+      # each spec becomes `.../<sha>` — the doc-tests exercise this PR/push rather
+      # than master. An empty sha (fork PR) leaves the URL on latest.
       - name: Run every doc-test
         run: |
           mkdir -p "${{ runner.temp }}/reports"
@@ -69,6 +96,7 @@ jobs:
               "$spec" \
               --verbose \
               --continue-on-fail \
+              --release-for "logos-package-manager=${{ steps.commit.outputs.sha }}" \
               --report "${{ runner.temp }}/reports/${name}.html" || rc=1
             echo "::endgroup::"
           done
@@ -78,7 +106,9 @@ jobs:
         run: |
           for spec in doctests/*.test.yaml; do
             name="$(basename "${spec%.test.yaml}")"
-            nix run github:logos-co/logos-doctest -- generate "$spec" -o "/tmp/${name}.md"
+            nix run github:logos-co/logos-doctest -- generate "$spec" \
+              --release-for "logos-package-manager=${{ steps.commit.outputs.sha }}" \
+              -o "/tmp/${name}.md"
             test -s "/tmp/${name}.md"
             echo "Generated /tmp/${name}.md ($(wc -l < "/tmp/${name}.md") lines)"
           done

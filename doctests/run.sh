@@ -20,15 +20,38 @@ cd "$(dirname "$0")"
 # The doctest CLI. Override by exporting DOCTEST (space-separated command).
 read -r -a DOCTEST <<< "${DOCTEST:-nix run github:logos-co/logos-doctest --}"
 
+# Build the doc-tests against THIS repo's current commit rather than the latest
+# published flake. Each spec's `github:logos-co/logos-package-manager{release}`
+# URL is pinned to $COMMIT via --release-for, so the run exercises exactly what's
+# checked out here. Override by exporting COMMIT (e.g. a tag), or set COMMIT=""
+# to fall back to latest.
+#
+# Note: nix fetches the commit from the GitHub remote, so $COMMIT must be pushed
+# to logos-co/logos-package-manager. A local-only / uncommitted HEAD won't
+# resolve; export COMMIT="" (or push first) in that case.
+COMMIT="${COMMIT-$(git rev-parse HEAD)}"
+RELEASE_FOR=()
+if [ -n "${COMMIT}" ]; then
+  RELEASE_FOR=(--release-for "logos-package-manager=${COMMIT}")
+  echo "==> Pinning logos-package-manager to ${COMMIT}"
+else
+  echo "==> COMMIT empty; building logos-package-manager from latest"
+fi
+
 mkdir -p outputs
 
 for spec in *.test.yaml; do
   name="$(basename "${spec%.test.yaml}")"
   echo "==> Running ${spec}"
-  "${DOCTEST[@]}" run "${spec}" --verbose --continue-on-fail
+  # ${RELEASE_FOR[@]+...} guards the expansion so an empty array doesn't trip
+  # `set -u` on older bash (e.g. macOS's stock 3.2).
+  "${DOCTEST[@]}" run "${spec}" --verbose --continue-on-fail \
+    ${RELEASE_FOR[@]+"${RELEASE_FOR[@]}"}
 
   echo "==> Generating outputs/${name}.md"
-  "${DOCTEST[@]}" generate "${spec}" -o "outputs/${name}.md"
+  "${DOCTEST[@]}" generate "${spec}" \
+    ${RELEASE_FOR[@]+"${RELEASE_FOR[@]}"} \
+    -o "outputs/${name}.md"
 done
 
 echo "==> Done. Rendered docs are in doctests/outputs/"
