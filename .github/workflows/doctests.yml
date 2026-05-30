@@ -79,7 +79,13 @@ jobs:
 
       # The runner is the shared `doctest` CLI, invoked directly via its flake
       # (github:logos-co/logos-doctest). The flake bundles Python + PyYAML, so no
-      # pip install step is needed. Each spec gets its own HTML report.
+      # pip install step is needed.
+      #
+      # All specs are passed to a SINGLE `doctest run` so they land in one HTML
+      # report — the report's top-right dropdown switches between them. (Running
+      # one spec per invocation would emit a separate file each and lose the
+      # dropdown.) --continue-on-fail makes the run walk every spec/step so the
+      # report is complete; the job still exits non-zero if any step failed.
       #
       # --release-for pins the {release} placeholder for this one repo to the
       # commit under test, so `github:logos-co/logos-package-manager{release}` in
@@ -88,19 +94,12 @@ jobs:
       - name: Run every doc-test
         run: |
           mkdir -p "${{ runner.temp }}/reports"
-          rc=0
-          for spec in doctests/*.test.yaml; do
-            name="$(basename "${spec%.test.yaml}")"
-            echo "::group::doctest run $spec"
-            nix run github:logos-co/logos-doctest -- run \
-              "$spec" \
-              --verbose \
-              --continue-on-fail \
-              --release-for "logos-package-manager=${{ steps.commit.outputs.sha }}" \
-              --report "${{ runner.temp }}/reports/${name}.html" || rc=1
-            echo "::endgroup::"
-          done
-          exit $rc
+          nix run github:logos-co/logos-doctest -- run \
+            doctests/*.test.yaml \
+            --verbose \
+            --continue-on-fail \
+            --release-for "logos-package-manager=${{ steps.commit.outputs.sha }}" \
+            --report "${{ runner.temp }}/reports/index.html"
 
       - name: Verify markdown generation works
         run: |
@@ -161,27 +160,11 @@ jobs:
           found=""
           for os in ubuntu-latest macos-latest; do
             src="artifacts/lgpm-doctest-reports-$os"
-            # Only count it if the directory has at least one .html report.
-            if [ -d "$src" ] && ls "$src"/*.html >/dev/null 2>&1; then
+            # Each OS now produces a single combined report (index.html) whose
+            # built-in dropdown switches between specs — just publish it as-is.
+            if [ -f "$src/index.html" ]; then
               mkdir -p "site/$BASE/$os"
-              cp "$src"/*.html "site/$BASE/$os/"
-
-              # Per-OS landing page linking each report (no single index.html
-              # like the tutorial — this repo emits one report per spec).
-              {
-                echo "<!doctype html><meta charset=utf-8>"
-                echo "<title>lgpm doc-test reports — $BASE / $os</title>"
-                echo "<style>body{font:16px system-ui;margin:40px;max-width:640px}a{color:#2563eb}</style>"
-                echo "<h1>lgpm doc-test reports</h1>"
-                echo "<p><strong>$BASE</strong> · <code>$os</code> · commit <code>${GITHUB_SHA::7}</code></p><ul>"
-                for f in "site/$BASE/$os"/*.html; do
-                  bn="$(basename "$f")"
-                  [ "$bn" = "index.html" ] && continue
-                  echo "<li><a href=\"./$bn\">$bn</a></li>"
-                done
-                echo "</ul>"
-              } > "site/$BASE/$os/index.html"
-
+              cp "$src/index.html" "site/$BASE/$os/index.html"
               found="$found $os"
             fi
           done
