@@ -241,3 +241,34 @@ nix build .#tests                # build and run tests
 
 - `logos-package` — LGX format library
 - `nlohmann_json` — JSON parsing
+
+## Executable doc-tests
+
+The [`doctests/`](doctests/) directory holds **executable docs** powered by **[logos-doctest](https://github.com/logos-co/logos-doctest)**
+
+| Spec | What it covers |
+|------|----------------|
+| [`lgpm-cli.test.yaml`](doctests/lgpm-cli.test.yaml) | Builds `lgpm`, hand-crafts two `.lgx` packages, installs them, and exercises every subcommand (`install`, `list`, `info`, `deps`, `dependents`). |
+| [`install-real-module.test.yaml`](doctests/install-real-module.test.yaml) | Clones a real module ([`logos-accounts-module`](https://github.com/logos-co/logos-accounts-module)), builds its `.lgx` via the module's `#lgx` flake output, and installs it with `lgpm`. |
+
+```bash
+./doctests/run.sh
+```
+
+Or invoke the `doctest` CLI directly on a single spec:
+
+```bash
+# Execute a spec end-to-end (builds lgpm, installs packages, asserts output)
+nix run github:logos-co/logos-doctest -- run doctests/lgpm-cli.test.yaml --verbose
+
+# Render the Markdown doc from a spec (into the gitignored outputs/ dir)
+nix run github:logos-co/logos-doctest -- generate doctests/lgpm-cli.test.yaml -o doctests/outputs/lgpm-cli.md
+```
+
+Add `--report report.html` to the `run` to get a self-contained two-column HTML
+report — the rendered doc on the left, the exact commands that ran and their
+output on the right — handy for reviewing a run or publishing from CI:
+
+```bash
+nix run github:logos-co/logos-doctest -- run doctests/lgpm-cli.test.yaml --report report.html
+```
