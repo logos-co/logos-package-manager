@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "package_manager_lib.h"
+#include "test_support.h"
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
@@ -287,4 +288,83 @@ TEST_F(ScanningTest, SkipSubdirWithoutManifest) {
 
     auto packages = pm.getInstalledPackages();
     EXPECT_TRUE(packages.empty());
+}
+
+// Create an installed module directory carrying a `variant` file recording
+// which variant was extracted there — mirrors what installPluginFile writes.
+static void createModuleWithVariantFile(const fs::path& dir, const std::string& name,
+                                        const std::string& installedVariant) {
+    fs::path moduleDir = dir / name;
+    fs::create_directories(moduleDir);
+
+    json manifest;
+    manifest["name"] = name;
+    manifest["type"] = "core";
+    manifest["version"] = "1.0.0";
+    manifest["main"] = name + ".so";
+    std::ofstream(moduleDir / (name + ".so")) << "binary";
+
+    std::ofstream mf(moduleDir / "manifest.json");
+    mf << manifest.dump(2);
+    mf.close();
+
+    std::ofstream vf(moduleDir / "variant");
+    vf << installedVariant;
+}
+
+TEST_F(ScanningTest, MismatchingVariantLogsWarning) {
+    // A module installed for a variant we never support on this platform.
+    createModuleWithVariantFile(tempDir, "mismatch_mod", "totally-bogus-platform");
+
+    PackageManagerLib pm;
+    pm.setUserModulesDirectory(tempDir.string());
+
+    std::string output;
+    {
+        CerrCapture cap;
+        pm.getInstalledModules();
+        output = cap.str();
+    }
+
+    EXPECT_NE(output.find("mismatch_mod"), std::string::npos) << output;
+    EXPECT_NE(output.find("totally-bogus-platform"), std::string::npos) << output;
+    EXPECT_NE(output.find(tempDir.string()), std::string::npos) << output;
+    EXPECT_NE(output.find("Warning"), std::string::npos) << output;
+}
+
+TEST_F(ScanningTest, MatchingVariantDoesNotLogWarning) {
+    // Variant file records a variant the current build actually supports.
+    auto variants = PackageManagerLib::platformVariantsToTry();
+    ASSERT_FALSE(variants.empty());
+    createModuleWithVariantFile(tempDir, "match_mod", variants.front());
+
+    PackageManagerLib pm;
+    pm.setUserModulesDirectory(tempDir.string());
+
+    std::string output;
+    {
+        CerrCapture cap;
+        pm.getInstalledModules();
+        output = cap.str();
+    }
+
+    EXPECT_EQ(output.find("match_mod"), std::string::npos) << output;
+}
+
+TEST_F(ScanningTest, NoVariantFileDoesNotLogWarning) {
+    // Modules without a `variant` file (embedded / legacy installs) carry no
+    // installed-variant signal and must not be flagged as mismatches.
+    createFakeModule("legacy_mod", "core");
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(tempDir.string());
+
+    std::string output;
+    {
+        CerrCapture cap;
+        pm.getInstalledModules();
+        output = cap.str();
+    }
+
+    EXPECT_EQ(output.find("legacy_mod"), std::string::npos) << output;
 }

@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "package_manager_lib.h"
+#include "test_support.h"
 #include <lgx.h>
 #include <filesystem>
 #include <fstream>
@@ -105,6 +106,52 @@ protected:
         res = lgx_save(pkg, lgxPath.string().c_str());
         lgx_free_package(pkg);
 
+        if (!res.success) return {};
+        return lgxPath;
+    }
+
+    /**
+     * Create a minimal unsigned LGX package whose only variant is the given
+     * (typically non-host) variant name. Used to exercise the install-time
+     * variant-mismatch path. Returns the path to the .lgx file.
+     */
+    fs::path createPackageWithVariant(const std::string& name,
+                                      const std::string& variant) {
+        fs::path lgxPath = tempDir / (name + ".lgx");
+        fs::path contentDir = tempDir / (name + "_content");
+        fs::create_directories(contentDir);
+
+        // Match the host library extension, like createUnsignedPackage.
+#if defined(__APPLE__)
+        std::string libName = name + "_plugin.dylib";
+#elif defined(_WIN32)
+        std::string libName = name + "_plugin.dll";
+#else
+        std::string libName = name + "_plugin.so";
+#endif
+        {
+            std::ofstream f(contentDir / libName);
+            f << "fake library content";
+        }
+        {
+            std::ofstream mf(contentDir / "manifest.json");
+            mf << "{\n"
+               << "  \"name\": \"" << name << "\",\n"
+               << "  \"version\": \"1.0.0\",\n"
+               << "  \"type\": \"core\",\n"
+               << "  \"category\": \"test\"\n"
+               << "}";
+        }
+
+        lgx_result_t res = lgx_create(lgxPath.string().c_str(), name.c_str());
+        if (!res.success) return {};
+        lgx_package_t pkg = lgx_load(lgxPath.string().c_str());
+        if (!pkg) return {};
+        res = lgx_add_variant(pkg, variant.c_str(),
+                              contentDir.string().c_str(), libName.c_str());
+        if (!res.success) { lgx_free_package(pkg); return {}; }
+        res = lgx_save(pkg, lgxPath.string().c_str());
+        lgx_free_package(pkg);
         if (!res.success) return {};
         return lgxPath;
     }
@@ -585,4 +632,35 @@ TEST_F(SignatureTest, KeyringListKeys) {
     EXPECT_TRUE(names.count("key-two"));
 
     lgx_free_keyring_list(list);
+}
+
+// =============================================================================
+// Install Flow: variant mismatch logging (logos-basecamp#191)
+// =============================================================================
+
+TEST_F(SignatureTest, InstallVariantMismatchFailsAndLogs) {
+    // Package provides only a variant this build never accepts.
+    auto lgxPath = createPackageWithVariant("variant_mismatch_pkg",
+                                            "totally-bogus-platform");
+    ASSERT_FALSE(lgxPath.empty());
+
+    auto pm = createPM(SignaturePolicy::NONE);
+    std::string errorMsg;
+    std::string result;
+    std::string logged;
+    {
+        CerrCapture cap;
+        result = pm.installPluginFile(lgxPath.string(), errorMsg);
+        logged = cap.str();
+    }
+
+    // Install must fail with an explanatory error that names the provided variant.
+    EXPECT_TRUE(result.empty());
+    EXPECT_NE(errorMsg.find("variant"), std::string::npos) << errorMsg;
+    EXPECT_NE(errorMsg.find("totally-bogus-platform"), std::string::npos) << errorMsg;
+
+    // ...and a warning line must be logged naming the package and both variant lists.
+    EXPECT_NE(logged.find("Warning"), std::string::npos) << logged;
+    EXPECT_NE(logged.find("totally-bogus-platform"), std::string::npos) << logged;
+    EXPECT_NE(logged.find(lgxPath.string()), std::string::npos) << logged;
 }
