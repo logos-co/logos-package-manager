@@ -28,6 +28,15 @@ static std::vector<std::string> splitString(const std::string& s, char delim) {
     return parts;
 }
 
+static std::string joinStrings(const std::vector<std::string>& items, const char* sep) {
+    std::string out;
+    for (size_t i = 0; i < items.size(); ++i) {
+        if (i) out += sep;
+        out += items[i];
+    }
+    return out;
+}
+
 const char* installTypeToString(InstallType t) {
     switch (t) {
         case InstallType::Embedded: return "embedded";
@@ -388,6 +397,26 @@ static std::string resolveMainFilePath(const json& manifest,
     return {};
 }
 
+// Reads the single-line `variant` file that installPluginFile writes into
+// every installed module directory, recording which variant was physically
+// extracted there. Returns empty if the file is absent (e.g. embedded or
+// legacy installs) — callers must treat that as "unknown", not a mismatch.
+static std::string readInstalledVariant(const fs::path& moduleDir)
+{
+    std::ifstream vf(moduleDir / "variant");
+    if (!vf.is_open())
+        return {};
+    std::string variant;
+    std::getline(vf, variant);
+    // Trim trailing whitespace / CR so the comparison is exact.
+    while (!variant.empty() &&
+           (variant.back() == '\r' || variant.back() == '\n' ||
+            variant.back() == ' '  || variant.back() == '\t')) {
+        variant.pop_back();
+    }
+    return variant;
+}
+
 // Enumerate all manifests under the given embedded + user dir lists,
 // deduping by package name with user-dir entries winning over embedded ones.
 // `types` filter selects by manifest.type; empty = no filter.
@@ -450,6 +479,23 @@ static std::map<std::string, ScanEntry> enumerateManifests(
             scan.installDir = entry.path().string();
             scan.installType = installType;
             scan.mainFilePath = resolveMainFilePath(manifest, entry.path(), variants);
+
+            // Surface the variant-mismatch silent-drop (logos-basecamp#191): a
+            // module installed for a variant this build does not accept is
+            // unloadable on this platform but otherwise scans clean. The
+            // installed `variant` file records exactly what was extracted here,
+            // so compare it against the supported list and emit one line per
+            // affected module (naming the installed variant, the supported list,
+            // and the directory) so the cause is greppable. Modules without a
+            // variant file (embedded / legacy installs) are left untouched.
+            std::string installedVariant = readInstalledVariant(entry.path());
+            if (!installedVariant.empty() &&
+                std::find(variants.begin(), variants.end(), installedVariant) == variants.end()) {
+                std::cerr << "Warning: module '" << name << "' in " << entry.path().string()
+                          << " was installed for variant '" << installedVariant
+                          << "' which is not supported on this platform and will not be loadable: "
+                          << "supported variants [" << joinStrings(variants, ", ") << "].\n";
+            }
 
             if (manifest.contains("dependencies") && manifest["dependencies"].is_array()) {
                 for (const auto& d : manifest["dependencies"]) {
@@ -905,7 +951,25 @@ bool PackageManagerLib::extractLgxPackage(const std::string& lgxPath, const std:
     }
 
     if (matchedVariant.empty()) {
-        errorMsg = "Package does not contain variant for platform: " + variants.front();
+        // Collect the variants the package actually provides so the failure is
+        // self-explanatory. The common cause is a dev/portable mismatch: a
+        // package built for "<host>-dev" installed by a portable build that only
+        // accepts "<host>" (or vice versa). Naming both lists turns a silent
+        // "Package does not contain variant" into an actionable line.
+        std::vector<std::string> available;
+        const char** pkgVariants = lgx_get_variants(pkg);
+        if (pkgVariants) {
+            for (size_t i = 0; pkgVariants[i] != nullptr; ++i)
+                available.push_back(pkgVariants[i]);
+            lgx_free_string_array(pkgVariants);
+        }
+        std::string availableList = available.empty() ? "none" : joinStrings(available, ", ");
+        std::cerr << "Warning: package '" << lgxPath
+                  << "' has no variant matching this platform: tried ["
+                  << joinStrings(variants, ", ") << "], package provides ["
+                  << availableList << "].\n";
+        errorMsg = "Package does not contain variant for platform: " + variants.front()
+                 + " (package provides: " + availableList + ")";
         lgx_free_package(pkg);
         return false;
     }
