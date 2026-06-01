@@ -1,0 +1,268 @@
+name: "Managing Local Packages with lgpm"
+output: lgpm-cli.md
+release: ""
+
+intro: |
+  [`lgpm`](https://github.com/logos-co/logos-package-manager) is the **local**
+  Logos package manager. It installs `.lgx` packages into a set of directories,
+  scans what is installed, and answers dependency questions — all offline, with no
+  network access (fetching packages is the job of
+  [`lgpd`](https://github.com/logos-co/logos-package-downloader)).
+
+  We build the `lgpm` CLI, hand-craft two `.lgx` packages (a
+  core module and a UI plugin that depends on it), install them, and explore them
+  with `list`, `info`, `deps`, and `dependents`.
+
+what_you_build: "Two installed Logos packages and a working tour of every `lgpm` subcommand."
+
+what_you_learn:
+  - What an `.lgx` package is on disk, and how to build one by hand
+  - How to install a local `.lgx` package with `lgpm install --file`
+  - How to list, inspect (`info`), and query the dependency graph (`deps` / `dependents`)
+  - How `--json` turns every command into machine-readable output
+
+prerequisites:
+  - "**Nix** with flakes enabled — used to build the `lgpm` CLI."
+  - "A Linux or macOS machine (the package variants below cover both)."
+
+sections:
+  - title: "Build the lgpm CLI"
+    step: true
+    text: |
+      `lgpm` ships as a C++ CLI. Build it straight from the flake and link the
+      result as `./lgpm` so the binary lands at `./lgpm/bin/lgpm`.
+
+      > Developing against a local checkout? Replace the GitHub reference with
+      > `.`, e.g. `nix build '.#cli' -o lgpm`.
+    steps:
+      - title: "Build lgpm"
+        run: "nix build 'github:logos-co/logos-package-manager{release}#cli' -o lgpm"
+        post_text: |
+          The `-o lgpm` flag names the result symlink, so the executable is at
+          `./lgpm/bin/lgpm`.
+
+      - title: "Confirm it runs"
+        run: "./lgpm/bin/lgpm --version"
+        expect_contains:
+          - "lgpm version"
+        check_file: "lgpm/bin/lgpm"
+
+  - title: "Detect the platform variant"
+    step: true
+    text: |
+      An `.lgx` package carries one or more **platform variants**. A dev build of
+      `lgpm` installs the variant matching this machine with a `-dev` suffix (for
+      example `linux-x86_64-dev` or `darwin-arm64-dev`). Detect it once and stash
+      it in a file so the packaging steps can reuse it.
+    steps:
+      - title: "Write the variant name to ./variant"
+        run: |
+          case "$(uname -s) $(uname -m)" in
+            "Linux x86_64")   echo linux-x86_64-dev  > variant ;;
+            "Linux aarch64")  echo linux-arm64-dev   > variant ;;
+            "Darwin arm64")   echo darwin-arm64-dev  > variant ;;
+            "Darwin x86_64")  echo darwin-x86_64-dev > variant ;;
+            *) echo "unsupported platform: $(uname -sm)" >&2; exit 1 ;;
+          esac
+          echo "variant: $(cat variant)"
+        expect_contains:
+          - "variant:"
+
+  - title: "Create the core module package"
+    step: true
+    text: |
+      An `.lgx` file is just a **gzipped tar archive** with a `manifest.json` at
+      its root and the payload under `variants/<platform>/`. `lgpm` reads the
+      manifest to learn the package's name, version, type, dependencies, and entry
+      point — so a hand-built tarball is a perfectly valid package. (In a real
+      project [`nix-bundle-lgx`](https://github.com/logos-co/nix-bundle-lgx)
+      generates these from a module's `metadata.json`; here we write the manifest
+      by hand to keep the focus on `lgpm`.)
+
+      We start with a tiny **core module** called `greeter`. The payload is a stub —
+      `lgpm` installs and indexes packages by their manifest; it does not load the
+      binary.
+    steps:
+      - title: "Write greeter's manifest"
+        text: "The manifest lives at the root of the package tree:"
+        file:
+          path: build/greeter/manifest.json
+          language: json
+          content: |
+            {
+              "manifestVersion": "0.2.0",
+              "name": "greeter",
+              "version": "1.0.0",
+              "description": "Says hello",
+              "author": "Logos",
+              "type": "core",
+              "category": "demo",
+              "icon": "",
+              "dependencies": [],
+              "main": { "PLACEHOLDER_VARIANT": "greeter.{ext}" }
+            }
+        post_text: |
+          The `main` key maps each platform variant to its entry-point file. The
+          next step substitutes this machine's variant name for the placeholder.
+
+      - title: "Stamp the variant into the manifest and pack the .lgx"
+        run: |
+          VARIANT="$(cat variant)"
+          sed -i.bak "s/PLACEHOLDER_VARIANT/$VARIANT/" build/greeter/manifest.json && rm -f build/greeter/manifest.json.bak
+          mkdir -p "build/greeter/variants/$VARIANT"
+          echo 'stub library' > "build/greeter/variants/$VARIANT/greeter.{ext}"
+          tar -C build/greeter -czf greeter.lgx manifest.json variants
+        code_block: |
+          VARIANT="$(cat variant)"
+
+          # Point main[<variant>] at the real variant name
+          sed -i "s/PLACEHOLDER_VARIANT/$VARIANT/" build/greeter/manifest.json
+
+          # Payload goes under variants/<platform>/ (e.g. variants/linux-x86_64-dev/)
+          mkdir -p "build/greeter/variants/$VARIANT"
+          echo 'stub library' > "build/greeter/variants/$VARIANT/greeter.so"  # .dylib on macOS
+
+          # An .lgx is a gzipped tar of the manifest + the variants/ tree
+          tar -C build/greeter -czf greeter.lgx manifest.json variants
+        post_text: "Confirm the archive layout:"
+        extra_run:
+          run: "tar -tzf greeter.lgx"
+          post_text: |
+            ```
+            manifest.json
+            variants/
+            variants/<platform>-dev/
+            variants/<platform>-dev/greeter.so
+            ```
+
+  - title: "Create the UI plugin package"
+    step: true
+    text: |
+      Now a **UI plugin** named `greeter_ui` whose manifest declares a dependency
+      on `greeter`. The `dependencies` array is what powers `deps` / `dependents`.
+    steps:
+      - title: "Write greeter_ui's manifest"
+        file:
+          path: build/greeter_ui/manifest.json
+          language: json
+          content: |
+            {
+              "manifestVersion": "0.2.0",
+              "name": "greeter_ui",
+              "version": "1.0.0",
+              "description": "A face for greeter",
+              "author": "Logos",
+              "type": "ui",
+              "category": "demo",
+              "icon": "",
+              "dependencies": ["greeter"],
+              "main": { "PLACEHOLDER_VARIANT": "greeter_ui.{ext}" }
+            }
+
+      - title: "Stamp the variant and pack it"
+        run: |
+          VARIANT="$(cat variant)"
+          sed -i.bak "s/PLACEHOLDER_VARIANT/$VARIANT/" build/greeter_ui/manifest.json && rm -f build/greeter_ui/manifest.json.bak
+          mkdir -p "build/greeter_ui/variants/$VARIANT"
+          echo 'stub library' > "build/greeter_ui/variants/$VARIANT/greeter_ui.{ext}"
+          tar -C build/greeter_ui -czf greeter_ui.lgx manifest.json variants
+        code_block: |
+          VARIANT="$(cat variant)"
+          sed -i "s/PLACEHOLDER_VARIANT/$VARIANT/" build/greeter_ui/manifest.json
+          mkdir -p "build/greeter_ui/variants/$VARIANT"
+          echo 'stub library' > "build/greeter_ui/variants/$VARIANT/greeter_ui.so"
+          tar -C build/greeter_ui -czf greeter_ui.lgx manifest.json variants
+
+  - title: "Install the packages"
+    step: true
+    text: |
+      `lgpm` installs into the directories you give it — `--modules-dir` and
+      `--ui-plugins-dir` — and later scans both. Pass both on every command so it
+      sees the whole set. Our hand-built packages are unsigned, so we add
+      `--allow-unsigned`.
+    steps:
+      - title: "Install the core module"
+        run: "./lgpm/bin/lgpm --modules-dir ./modules --ui-plugins-dir ./plugins --allow-unsigned install --file ./greeter.lgx"
+        expect_contains:
+          - "Installed to:"
+
+      - title: "Install the UI plugin"
+        run: "./lgpm/bin/lgpm --modules-dir ./modules --ui-plugins-dir ./plugins --allow-unsigned install --file ./greeter_ui.lgx"
+        expect_contains:
+          - "Installed to:"
+
+  - title: "List what's installed"
+    step: true
+    text: |
+      `list` scans every configured directory and prints a table of installed
+      packages. Pass both directories so it sees the module and the plugin.
+    steps:
+      - title: "List packages"
+        run: "./lgpm/bin/lgpm --modules-dir ./modules --ui-plugins-dir ./plugins list"
+        expect_contains:
+          - "greeter"
+          - "greeter_ui"
+        post_text: |
+          Output (abridged):
+
+          ```
+          Found 2 installed module(s):
+
+          NAME                           VERSION         TYPE       CATEGORY
+          ----------------------------------------------------------------------
+          greeter                        1.0.0           core       demo
+          greeter_ui                     1.0.0           ui         demo
+          ```
+
+  - title: "Inspect a package with info"
+    step: true
+    text: |
+      `info <name>` prints the full record for a single installed package. Add
+      `--json` for the machine-readable form — handy for scripting.
+    steps:
+      - title: "Human-readable info"
+        run: "./lgpm/bin/lgpm --modules-dir ./modules --ui-plugins-dir ./plugins info greeter"
+        expect_contains:
+          - "Name: greeter"
+          - "Version: 1.0.0"
+          - "Type: core"
+
+      - title: "JSON info"
+        run: "./lgpm/bin/lgpm --modules-dir ./modules --ui-plugins-dir ./plugins info greeter_ui --json"
+        expect_contains:
+          - "\"name\": \"greeter_ui\""
+          - "\"version\": \"1.0.0\""
+
+  - title: "Query the dependency graph"
+    step: true
+    text: |
+      `deps` lists what a package depends on; `dependents` lists what depends on
+      it. These read the `dependencies` arrays across every installed package, so
+      both directories must be configured.
+    steps:
+      - title: "What does greeter_ui depend on?"
+        run: "./lgpm/bin/lgpm --modules-dir ./modules --ui-plugins-dir ./plugins deps greeter_ui"
+        expect_contains:
+          - "greeter"
+
+      - title: "What depends on greeter?"
+        run: "./lgpm/bin/lgpm --modules-dir ./modules --ui-plugins-dir ./plugins dependents greeter"
+        expect_contains:
+          - "greeter_ui"
+        post_text: |
+          Both commands accept `-r` / `--recursive` to walk the graph transitively,
+          and `--json` to emit a JSON array instead of one name per line.
+
+  - title: "Recap"
+    text: |
+      You built `lgpm`, hand-crafted two `.lgx` archives (a gzipped tar of a
+      `manifest.json` plus a `variants/` tree), installed them, and toured every
+      `lgpm` subcommand:
+
+      | Command | What it does |
+      |---|---|
+      | `install --file <pkg>` | Install one `.lgx` (use `--dir` for a whole folder) |
+      | `list` | Table of everything installed |
+      | `info <name>` | Full record for one package (`--json` for machine output) |
+      | `deps <name>` | What a package depends on (`-r` for transitive) |
+      | `dependents <name>` | What depends on a package (`-r` for transitive) |

@@ -1,0 +1,102 @@
+name: "Installing a Real Module with lgpm"
+output: install-real-module.md
+release: ""
+
+intro: |
+  The [`lgpm-cli`](lgpm-cli.md) doc builds packages by hand to focus on the CLI.
+  This one is the real thing end-to-end: it clones an actual Logos module
+  ([`logos-accounts-module`](https://github.com/logos-co/logos-accounts-module)),
+  builds its `.lgx` package straight from the module's own flake, and installs it
+  with `lgpm`.
+
+what_you_build: "The `accounts_module` core module, packaged as `.lgx` and installed via lgpm."
+
+what_you_learn:
+  - How a module's flake exposes a ready-to-install `.lgx` via the `#lgx` output
+  - How to install a freshly-built `.lgx` with `lgpm install --file`
+  - How to confirm the install with `list` and `info`
+
+prerequisites:
+  - "**Nix** with flakes enabled — builds both `lgpm` and the module's `.lgx`."
+  - "**git** — to clone the module repository."
+  - "A Linux or macOS machine."
+
+sections:
+  - title: "Build the lgpm CLI"
+    step: true
+    text: |
+      Build `lgpm` from this repository's flake and link it as `./lgpm`.
+
+      > Developing against a local checkout? Use `nix build '.#cli' -o lgpm`.
+    steps:
+      - title: "Build lgpm"
+        run: "nix build 'github:logos-co/logos-package-manager{release}#cli' -o lgpm"
+        check_file: "lgpm/bin/lgpm"
+
+  - title: "Clone the module"
+    step: true
+    text: |
+      Clone [`logos-accounts-module`](https://github.com/logos-co/logos-accounts-module) —
+      a real `core` module. We clone over HTTPS so the step works in CI; over SSH
+      the URL is `git@github.com:logos-co/logos-accounts-module.git`.
+    steps:
+      - title: "git clone"
+        run: "git clone --depth 1 https://github.com/logos-co/logos-accounts-module.git"
+        code_block: |
+          # HTTPS (used here):
+          git clone --depth 1 https://github.com/logos-co/logos-accounts-module.git
+
+          # or over SSH:
+          # git clone git@github.com:logos-co/logos-accounts-module.git
+        check_file: "logos-accounts-module/flake.nix"
+
+  - title: "Build the module's .lgx"
+    step: true
+    text: |
+      Every module built with
+      [`logos-module-builder`](https://github.com/logos-co/logos-module-builder)
+      exposes an `#lgx` output that packages the compiled plugin into an
+      installable `.lgx`. Build it and link the result as `./accounts-lgx`. (This
+      compiles the module and its SDK dependencies through Nix, so the first build
+      is slow.)
+    steps:
+      - title: "nix build .#lgx"
+        run: "nix build 'path:./logos-accounts-module#lgx' -o accounts-lgx"
+        code_block: |
+          # From inside the clone this is simply: nix build '.#lgx'
+          nix build 'path:./logos-accounts-module#lgx' -o accounts-lgx
+        post_text: "The `.lgx` package is now under `./accounts-lgx/`:"
+        extra_run:
+          run: "ls accounts-lgx/*.lgx"
+
+  - title: "Install it with lgpm"
+    step: true
+    text: |
+      Install the freshly-built package into a local `./modules` directory.
+      `accounts_module` is a `core` module, so it goes to `--modules-dir`. The
+      package is unsigned (a local dev build), so we pass `--allow-unsigned`.
+    steps:
+      - title: "Install the .lgx"
+        run: "./lgpm/bin/lgpm --modules-dir ./modules --allow-unsigned install --file accounts-lgx/*.lgx"
+        expect_contains:
+          - "Installed to:"
+
+  - title: "Confirm the install"
+    step: true
+    text: |
+      Scan the directory and inspect the installed module.
+    steps:
+      - title: "List installed packages"
+        run: "./lgpm/bin/lgpm --modules-dir ./modules list"
+        expect_contains:
+          - "accounts_module"
+
+      - title: "Show its details"
+        run: "./lgpm/bin/lgpm --modules-dir ./modules info accounts_module"
+        expect_contains:
+          - "Name: accounts_module"
+          - "Type: core"
+        post_text: |
+          That's the whole loop: a real module, packaged by its own flake and
+          installed with `lgpm` — no hand-written manifests. Add `--json` to either
+          command for machine-readable output.

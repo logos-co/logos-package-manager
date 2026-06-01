@@ -1,0 +1,13 @@
+# Nix build artifacts
+result
+result-*
+
+# doctests/run.sh local run artifacts (the spec normally runs in a temp dir,
+# but these can appear if you run the commands by hand in the repo)
+lgpm
+lgx
+modules/
+plugins/
+stage/
+variant
+*.lgx
