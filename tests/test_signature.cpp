@@ -121,7 +121,14 @@ protected:
         fs::path contentDir = tempDir / (name + "_content");
         fs::create_directories(contentDir);
 
+        // Match the host library extension, like createUnsignedPackage.
+#if defined(__APPLE__)
+        std::string libName = name + "_plugin.dylib";
+#elif defined(_WIN32)
+        std::string libName = name + "_plugin.dll";
+#else
         std::string libName = name + "_plugin.so";
+#endif
         {
             std::ofstream f(contentDir / libName);
             f << "fake library content";
