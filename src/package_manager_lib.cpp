@@ -160,7 +160,11 @@ std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, 
             std::string incomingVersion = rawVersion ? rawVersion : "";
             lgx_free_package(pkg);
 
-            if (!incomingName.empty() && !incomingVersion.empty()) {
+            // incomingName comes from the untrusted package; only use it as a
+            // path component if it is a valid single-segment module name, or a
+            // crafted name ("../x", "/abs") would let this probe arbitrary
+            // manifest.json files outside the install dirs (see F-006).
+            if (!incomingName.empty() && !incomingVersion.empty() && isValidModuleName(incomingName)) {
                 for (const auto& baseDir : allDirectories()) {
                     if (baseDir.empty())
                         continue;
@@ -886,6 +890,26 @@ std::vector<std::string> PackageManagerLib::platformVariantsToTry()
     return variants;
 }
 
+bool PackageManagerLib::isValidModuleName(const std::string& name)
+{
+    // A module name becomes a single directory component under the install
+    // directory, so anything that isn't a plain leaf segment is rejected. This
+    // blocks the path-traversal vectors that std::filesystem::operator/ would
+    // otherwise honor: ".." escapes upward, an absolute path resets the join,
+    // and embedded separators create nested or sibling directories.
+    if (name.empty() || name == "." || name == "..")
+        return false;
+
+    for (char c : name) {
+        // '/' and '\\' are path separators; ':' is a Windows drive separator
+        // ("C:foo" is drive-relative); '\0' truncates the path at the C ABI.
+        if (c == '/' || c == '\\' || c == ':' || c == '\0')
+            return false;
+    }
+
+    return true;
+}
+
 bool PackageManagerLib::copyDirectoryContents(const std::string& srcDir, const std::string& destDir, std::string& errorMsg)
 {
     if (!fs::is_directory(srcDir)) {
@@ -1115,8 +1139,32 @@ bool PackageManagerLib::copyLibraryFromExtracted(const std::string& extractedDir
         }
     }
 
+    // The module name (whether from the manifest or the library-file fallback)
+    // is about to become a directory component under targetDir. Reject anything
+    // that isn't a single plain segment before the join, or a crafted manifest
+    // "name" like "../../x" or "/abs" would let the copy escape targetDir and
+    // plant files (e.g. an auto-loaded plugin) anywhere on disk — F-006.
+    if (!isValidModuleName(moduleName)) {
+        errorMsg = "Invalid module name in manifest: " + moduleName;
+        return false;
+    }
+
     outModuleName = moduleName;
     std::string moduleSubDir = (fs::path(targetDir) / moduleName).string();
+
+    // Defense in depth: even with the name validated, confirm the resolved
+    // destination is lexically contained within targetDir before any write
+    // happens. weakly_canonical resolves "."/".." without requiring the path to
+    // exist, so this runs ahead of copyDirectoryContents.
+    {
+        fs::path canonicalTarget = fs::weakly_canonical(fs::path(targetDir));
+        fs::path canonicalSub = fs::weakly_canonical(fs::path(moduleSubDir));
+        auto rel = fs::relative(canonicalSub, canonicalTarget);
+        if (rel.empty() || rel.native().rfind("..", 0) == 0) {
+            errorMsg = "Resolved install path escapes target directory: " + moduleSubDir;
+            return false;
+        }
+    }
 
     if (!copyDirectoryContents(variantDir, moduleSubDir, errorMsg)) {
         return false;
