@@ -207,6 +207,14 @@ public:
     static bool versionGreaterOrEqual(const std::string& a, const std::string& b);
     static bool copyDirectoryContents(const std::string& srcDir, const std::string& destDir, std::string& errorMsg);
 
+    // Validates a module name that came from an untrusted manifest before it is
+    // used as a path component when installing. A name is only safe to join onto
+    // an install directory if it is a single, plain path segment: rejects empty,
+    // ".", "..", anything containing a path separator ('/' or '\\'), a NUL byte,
+    // or a leading drive separator. This is the guard against F-006 (path
+    // traversal via the manifest "name" field).
+    static bool isValidModuleName(const std::string& name);
+
 private:
     std::vector<std::string> m_embeddedModulesDirs;
     std::string m_userModulesDir;
