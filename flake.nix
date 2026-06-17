@@ -7,14 +7,9 @@
     logos-package.url = "github:logos-co/logos-package";
     nix-bundle-dir.url = "github:logos-co/nix-bundle-dir";
     nix-bundle-appimage.url = "github:logos-co/nix-bundle-appimage";
-    nix-bundle-macos-app = {
-      url = "github:logos-co/nix-bundle-macos-app";
-      inputs.nixpkgs.follows = "nixpkgs";
-      inputs.nix-bundle-dir.follows = "nix-bundle-dir";
-    };
   };
 
-  outputs = { self, nixpkgs, logos-nix, logos-package, nix-bundle-dir, nix-bundle-appimage, nix-bundle-macos-app }:
+  outputs = { self, nixpkgs, logos-nix, logos-package, nix-bundle-dir, nix-bundle-appimage }:
     let
       systems = [ "aarch64-darwin" "x86_64-darwin" "aarch64-linux" "x86_64-linux" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f {
@@ -22,11 +17,10 @@
         pkgs = import nixpkgs { inherit system; };
         logosPackageLib = logos-package.packages.${system}.lib;
         dirBundler = nix-bundle-dir.bundlers.${system}.permissive;
-        macosAppBundler = nix-bundle-macos-app.lib.${system}.mkMacOSApp;
       });
     in
     {
-      packages = forAllSystems ({ pkgs, system, logosPackageLib, dirBundler, macosAppBundler }:
+      packages = forAllSystems ({ pkgs, system, logosPackageLib, dirBundler }:
         let
           # Common configuration (dev, default)
           common = import ./nix/default.nix { inherit pkgs logosPackageLib; };
@@ -70,17 +64,6 @@
             bundle = dirBundler cliPortable;
             desktopFile = ./assets/lgpm.desktop;
             icon = ./assets/lgpm.png;
-          };
-        } // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
-          # macOS .app bundle (ad-hoc signed, notarization-ready structure).
-          # Released as a tar.gz; see .github/workflows/release.yml.
-          cli-macos-app = macosAppBundler {
-            drv = cliPortable;
-            name = "lgpm";
-            bundle = dirBundler cliPortable;
-            icon = ./assets/lgpm.png;
-            infoPlist = ./assets/macos/Info.plist.in;
-            entitlements = ./assets/macos/lgpm.entitlements;
           };
         } // {
           # Tests
