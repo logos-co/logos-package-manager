@@ -55,6 +55,7 @@ struct Hashes {
 // meaningful for ui_qml packages (the QML entry point).
 struct InstalledPackage {
     std::string name;
+    std::string displayName;
     std::string version;
     std::string description;
     std::string type;                       // "core" | "ui" | "ui_qml"
