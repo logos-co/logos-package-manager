@@ -541,6 +541,7 @@ static InstalledPackage scanToInstalledPackage(const ScanEntry& scan)
     p.dependencies = scan.dependencies;
 
     const json& m = scan.manifest;
+    p.displayName = m.value("display_name", "");
     p.description = m.value("description", "");
     p.category    = m.value("category", "");
     p.author      = m.value("author", "");
