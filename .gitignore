@@ -2,6 +2,9 @@
 result
 result-*
 
+# Generated build-info header (dropped into cmd/ by nix/cli.nix at build time)
+cmd/logos_build_info.h
+
 # doctests/run.sh local run artifacts (the spec normally runs in a temp dir,
 # but these can appear if you run the commands by hand in the repo)
 lgpm

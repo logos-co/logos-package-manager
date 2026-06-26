@@ -6,6 +6,7 @@
 
 #include "package_manager_lib.h"
 #include "package_manager_json.h"
+#include "version_info.h"
 
 namespace fs = std::filesystem;
 
@@ -277,7 +278,7 @@ int main(int argc, char* argv[]) {
             printHelp();
             return 0;
         } else if (args[i] == "-v" || args[i] == "--version") {
-            std::cout << "lgpm version 1.0.0\n";
+            std::cout << lgpm_version::versionString() << "\n";
             return 0;
         } else if (parseOption(args, i, "--modules-dir", modulesDir)) {
         } else if (parseOption(args, i, "--ui-plugins-dir", uiPluginsDir)) {
