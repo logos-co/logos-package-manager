@@ -1,9 +1,12 @@
+#include <algorithm>
 #include <filesystem>
 #include <iostream>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <vector>
 
+#include "lgx.h"
+#include "logos/semver.hpp"
 #include "package_manager_lib.h"
 #include "package_manager_json.h"
 #include "version_info.h"
@@ -118,10 +121,43 @@ static int cmdInstallDir(PackageManagerLib& pm, const std::string& dirPath) {
         return 1;
     }
 
-    std::sort(lgxFiles.begin(), lgxFiles.end());
+    // Install order matters: installPluginFile() overwrites, so within one
+    // package name the LAST install wins. Sorting the raw paths ordered
+    // "foo-1.10.0.lgx" before "foo-1.9.0.lgx" (lexicographically "1" < "9"), so
+    // the older 1.9.0 was installed last and clobbered the newer one. Order by
+    // the package's real (name, version) read from the archive, version
+    // ascending, so the newest of each package lands last.
+    struct Candidate {
+        fs::path    path;
+        std::string name;
+        std::string version;
+    };
+
+    std::vector<Candidate> candidates;
+    candidates.reserve(lgxFiles.size());
+    for (const auto& p : lgxFiles) {
+        Candidate c{p, {}, {}};
+        if (lgx_package_t pkg = lgx_load(p.string().c_str())) {
+            if (const char* n = lgx_get_name(pkg)) c.name = n;
+            if (const char* v = lgx_get_version(pkg)) c.version = v;
+            lgx_free_package(pkg);
+        }
+        // An unreadable package keeps an empty name/version: it sorts first and
+        // fails below with a proper error, rather than being silently dropped.
+        candidates.push_back(std::move(c));
+    }
+
+    std::sort(candidates.begin(), candidates.end(),
+              [](const Candidate& a, const Candidate& b) {
+                  if (a.name != b.name) return a.name < b.name;
+                  const int c = logos::semver::compare(a.version, b.version);
+                  if (c != 0) return c < 0;
+                  return a.path < b.path;  // deterministic tiebreak
+              });
 
     int failures = 0;
-    for (const auto& lgxPath : lgxFiles) {
+    for (const auto& candidate : candidates) {
+        const fs::path& lgxPath = candidate.path;
         std::cout << "Installing " << lgxPath.filename().string() << "..." << std::flush;
 
         std::string errorMsg;
