@@ -58,6 +58,17 @@ TEST(VersionTest, ReleaseIsNewerThanItsPreRelease) {
     EXPECT_FALSE(PackageManagerLib::versionGreaterOrEqual("1.0.0-rc.1", "1.0.0"));
 }
 
+// The exact regression the old atoi() split produced: a single-token
+// pre-release with NO dot. "1.0.0-rc1" split on '.' gave ["1","0","0-rc1"],
+// and atoi("0-rc1") == 0, so it compared EQUAL to "1.0.0". "rc.1" (with a dot)
+// wouldn't have reproduced it — the third component would have been a clean
+// "0". Keep this distinct case so a future regression here is caught.
+TEST(VersionTest, SingleTokenPreReleaseIsNewerThanRelease) {
+    EXPECT_TRUE(PackageManagerLib::versionGreaterOrEqual("1.0.0", "1.0.0-rc1"));
+    EXPECT_FALSE(PackageManagerLib::versionGreaterOrEqual("1.0.0-rc1", "1.0.0"));
+    EXPECT_TRUE(PackageManagerLib::versionGreaterOrEqual("1.0.0-beta2", "1.0.0-beta1"));
+}
+
 // The reported bug: numeric pre-release identifiers compare numerically, so
 // rc.11 is newer than rc.2 (a plain string compare says the opposite).
 TEST(VersionTest, NumericPreReleaseIdentifiersCompareNumerically) {
