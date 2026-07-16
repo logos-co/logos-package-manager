@@ -14,6 +14,7 @@
 #include <unordered_set>
 #include <nlohmann/json.hpp>
 #include "lgx.h"
+#include "logos/semver.hpp"
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -56,16 +57,11 @@ const char* dependencyStatusToString(DependencyStatus s) {
 
 bool PackageManagerLib::versionGreaterOrEqual(const std::string& a, const std::string& b)
 {
-    auto ap = splitString(a, '.');
-    auto bp = splitString(b, '.');
-    size_t len = std::max(ap.size(), bp.size());
-    for (size_t i = 0; i < len; ++i) {
-        int av = i < ap.size() ? std::atoi(ap[i].c_str()) : 0;
-        int bv = i < bp.size() ? std::atoi(bp[i].c_str()) : 0;
-        if (av != bv)
-            return av > bv;
-    }
-    return true; // equal
+    // Delegates to the shared implementation in logos-package. This used to
+    // split on '.' and atoi() each component, which parsed "1.0.0-rc1" as
+    // 1.0.0 — so a pre-release compared equal to its own release and the
+    // skipIfNotNewerVersion gate below refused to install over it.
+    return logos::semver::greater_or_equal(a, b);
 }
 
 PackageManagerLib::PackageManagerLib()
