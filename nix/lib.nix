@@ -41,6 +41,36 @@ pkgs.stdenv.mkDerivation {
     fi
     cp "''${lgxlibs[@]}" $out/lib/
 
+    # Windows only: liblgx's OWN runtime dependencies, not just liblgx itself.
+    #
+    # ELF and Mach-O consumers never need this -- the copied liblgx carries an
+    # RPATH / install-name back to the store paths its dependencies live in.
+    # PE has no rpath: an import table holds a DLL BASE NAME, resolved from the
+    # loading executable's directory. So a consumer can only stage what is
+    # present HERE, and anything left behind is unreachable later.
+    #
+    # ${logosPackageLib}/bin is exactly the right source: nixpkgs'
+    # win-dll-link.sh has already walked lgx.exe's import graph and staged the
+    # complete transitive closure there (libsodium-26.dll, the ICU pair,
+    # zlib1.dll, ...). Copying the DLLs from it is transitive by construction
+    # rather than a hand-maintained list that silently rots.
+    #
+    # Measured failure this prevents: with liblgx.dll present but
+    # libsodium-26.dll missing, logosctl.exe exited 53 with NO OUTPUT AT ALL --
+    # the loader gives up before main() and names nothing.
+    #
+    # Explicit `for` + `-f`, not a nullglob array: nullglob only drops patterns
+    # that CONTAIN a wildcard, so a fully interpolated literal path survives
+    # into the array and any guard over it passes vacuously.
+    if [ -d "${logosPackageLib}/bin" ]; then
+      for dep in ${logosPackageLib}/bin/*.dll; do
+        [ -f "$dep" ] || continue
+        # Do not clobber the liblgx.dll just copied above.
+        [ -e "$out/lib/$(basename "$dep")" ] && continue
+        cp -L "$dep" $out/lib/
+      done
+    fi
+
     # Copy header files
     cp ${src}/src/package_manager_lib.h $out/include/
     cp ${src}/src/lgpm.h $out/include/
