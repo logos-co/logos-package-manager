@@ -1158,7 +1158,14 @@ bool PackageManagerLib::copyLibraryFromExtracted(const std::string& extractedDir
         fs::path canonicalTarget = fs::weakly_canonical(fs::path(targetDir));
         fs::path canonicalSub = fs::weakly_canonical(fs::path(moduleSubDir));
         auto rel = fs::relative(canonicalSub, canonicalTarget);
-        if (rel.empty() || rel.native().rfind("..", 0) == 0) {
+        // Compare the first COMPONENT rather than doing a string prefix test.
+        // fs::path::native() is std::wstring on Windows, so rfind("..", 0) does
+        // not even compile there -- and the prefix test was imprecise anyway: it
+        // also matched a legitimate directory literally named "..foo", rejecting
+        // a path that does not actually escape. Component comparison is portable
+        // and exact. (Short-circuits, so *rel.begin() is only reached when rel
+        // is non-empty.)
+        if (rel.empty() || *rel.begin() == fs::path("..")) {
             errorMsg = "Resolved install path escapes target directory: " + moduleSubDir;
             return false;
         }
