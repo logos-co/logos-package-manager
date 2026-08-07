@@ -834,8 +834,29 @@ UninstallResult PackageManagerLib::uninstallPackage(const std::string& packageNa
     return result;
 }
 
+namespace {
+// Deliberately a plain global rather than something inferred from the
+// environment: a silent platform switch would defeat the fail-closed check that
+// stops a Windows package being installed as a Linux one.
+std::string g_platformVariantOverride;
+}
+
+void PackageManagerLib::setPlatformVariantOverride(const std::string& variant)
+{
+    g_platformVariantOverride = variant;
+}
+
+std::string PackageManagerLib::platformVariantOverride()
+{
+    return g_platformVariantOverride;
+}
+
 std::string PackageManagerLib::currentPlatformVariant()
 {
+    if (!g_platformVariantOverride.empty()) {
+        return g_platformVariantOverride;
+    }
+
 #if defined(__APPLE__)
     #if defined(__aarch64__)
         return "darwin-arm64";

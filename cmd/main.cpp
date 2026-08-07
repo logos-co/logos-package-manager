@@ -78,6 +78,9 @@ static void printHelp() {
               << "  --file <path>             LGX file path (for install command)\n"
               << "  --dir <path>              Directory of LGX files (for install command)\n"
               << "  --recursive, -r           For deps/dependents: walk the graph transitively\n"
+              << "  --platform <variant>      Install for a platform other than this machine\n"
+              << "                            (e.g. windows-x86_64). For cross-builds; without\n"
+              << "                            it lgpm refuses a package it cannot run.\n"
               << "  --json                    Output in JSON format\n"
               << "  --allow-unsigned          Accept unsigned packages without warning\n"
               << "  --require-signatures      Reject unsigned packages\n"
@@ -303,7 +306,7 @@ static int cmdInfo(PackageManagerLib& pm, const std::string& packageName, bool j
 int main(int argc, char* argv[]) {
     std::vector<std::string> args(argv + 1, argv + argc);
 
-    std::string modulesDir, uiPluginsDir, filePath, installDir, command, keyringDir;
+    std::string modulesDir, uiPluginsDir, filePath, installDir, command, keyringDir, platformVariant;
     std::vector<std::string> positionalArgs;
     bool jsonOutput = false;
     bool allowUnsigned = false;
@@ -321,6 +324,7 @@ int main(int argc, char* argv[]) {
         } else if (parseOption(args, i, "--file", filePath)) {
         } else if (parseOption(args, i, "--dir", installDir)) {
         } else if (parseOption(args, i, "--keyring", keyringDir)) {
+        } else if (parseOption(args, i, "--platform", platformVariant)) {
         } else if (args[i] == "--json") {
             jsonOutput = true;
         } else if (args[i] == "--allow-unsigned") {
@@ -357,6 +361,14 @@ int main(int argc, char* argv[]) {
 
     if (!keyringDir.empty())
         pm.setKeyringDirectory(keyringDir);
+
+    // Explicit only. Applied before any variant selection so install, list and
+    // info all agree on which platform is being managed.
+    if (!platformVariant.empty()) {
+        PackageManagerLib::setPlatformVariantOverride(platformVariant);
+        std::cerr << "lgpm: installing for platform '" << platformVariant
+                  << "' (overriding this machine's)\n";
+    }
 
     if (command == "install") {
         if (!filePath.empty()) {

@@ -193,6 +193,17 @@ public:
                                   bool isCoreModule, std::string& outModuleName, std::string& errorMsg);
 
     // Variant selection (platform detection)
+    // Install for a platform OTHER than the one we are running on.
+    //
+    // Needed for cross-builds: the Nix install bundler runs lgpm on the Linux
+    // builder to lay out a Windows package. Without this it fail-closes with
+    // "Package does not contain variant for platform: linux-x86_64 (package
+    // provides: windows-x86_64)" -- correct behaviour, and the protection is
+    // worth keeping, so this override is EXPLICIT and never inferred. Empty
+    // string restores the compiled-in platform.
+    static void setPlatformVariantOverride(const std::string& variant);
+    static std::string platformVariantOverride();
+
     static std::string currentPlatformVariant();
     static std::vector<std::string> platformVariantsToTry();
 
