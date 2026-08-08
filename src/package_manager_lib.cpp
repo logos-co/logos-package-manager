@@ -174,7 +174,12 @@ std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, 
                                 if (!installedVersion.empty() && versionGreaterOrEqual(installedVersion, incomingVersion)) {
                                     std::string existingDir = (fs::path(baseDir) / incomingName).string();
                                     if (installedPluginPath) *installedPluginPath = existingDir;
-                                    if (isCoreModuleOut) *isCoreModuleOut = false;
+                                    // Read the type off the manifest we just parsed. This used to
+                                    // be hardcoded false, so a skipped CORE install reported
+                                    // isCoreModule=false and package_manager_module emitted
+                                    // uiPluginFileInstalled for a core module — Basecamp then
+                                    // rescanned UI plugins instead of refreshing core modules.
+                                    if (isCoreModuleOut) *isCoreModuleOut = (doc.value("type", "") == "core");
                                     return existingDir;
                                 }
                             } catch (...) {
@@ -301,55 +306,92 @@ std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, 
         return {};
     }
 
-    // Determine the installed main file path
+    // Determine the path we report for what was just installed. This is the
+    // main file when the package ships one and the module directory otherwise;
+    // it is never empty here, because copyLibraryFromExtracted() has just
+    // created that directory.
     if (installedPluginPath) {
-        *installedPluginPath = {};
-        std::string mainFile;
-        bool isQmlPackage = (detectedType == "ui_qml");
-        fs::path installedManifestPath = fs::path(installDir) / installedModuleName / "manifest.json";
-        if (fs::exists(installedManifestPath)) {
-            std::ifstream mf(installedManifestPath);
-            if (mf.is_open()) {
-                try {
-                    json doc = json::parse(mf);
-                    if (doc.contains("main")) {
-                        if (doc["main"].is_object()) {
-                            for (const auto& v : platformVariantsToTry()) {
-                                if (doc["main"].contains(v)) {
-                                    mainFile = doc["main"][v].get<std::string>();
-                                    if (!mainFile.empty())
-                                        break;
-                                }
-                            }
-                        } else if (doc["main"].is_string()) {
-                            mainFile = doc["main"].get<std::string>();
-                        }
-                    }
-                } catch (...) {}
-            }
-        }
-        if (mainFile.empty() && !isQmlPackage) {
-            mainFile = installedModuleName;
-        }
-        if (!mainFile.empty()) {
-            if (!isQmlPackage && mainFile.find('.') == std::string::npos) {
-#if defined(__APPLE__)
-                mainFile += ".dylib";
-#elif defined(_WIN32)
-                mainFile += ".dll";
-#else
-                mainFile += ".so";
-#endif
-            }
-            fs::path mainPath = fs::path(installDir) / installedModuleName / mainFile;
-            if (fs::exists(mainPath)) {
-                *installedPluginPath = mainPath.string();
-            }
-        }
+        *installedPluginPath = resolveInstalledPackagePath(
+            (fs::path(installDir) / installedModuleName).string(),
+            platformVariantsToTry());
     }
 
     fs::remove_all(tempDir);
     return installDir;
+}
+
+std::string PackageManagerLib::resolveInstalledPackagePath(const std::string& moduleDir,
+                                                           const std::vector<std::string>& variants)
+{
+    fs::path dir(moduleDir);
+    const std::string moduleName = dir.filename().string();
+
+    std::string mainFile;
+    bool isQmlPackage = false;
+
+    fs::path manifestPath = dir / "manifest.json";
+    if (fs::exists(manifestPath)) {
+        std::ifstream mf(manifestPath);
+        if (mf.is_open()) {
+            try {
+                json doc = json::parse(mf);
+                isQmlPackage = (doc.value("type", "") == "ui_qml");
+                if (doc.contains("main")) {
+                    if (doc["main"].is_object()) {
+                        for (const auto& v : variants) {
+                            if (doc["main"].contains(v)) {
+                                mainFile = doc["main"][v].get<std::string>();
+                                if (!mainFile.empty())
+                                    break;
+                            }
+                        }
+                    } else if (doc["main"].is_string()) {
+                        mainFile = doc["main"].get<std::string>();
+                    }
+                }
+            } catch (...) {}
+        }
+    }
+
+    // Only non-ui_qml packages get a main file synthesised from the module
+    // name: a QML-only ui_qml package has no backend library at all, and
+    // guessing "<name>.so" for it would just miss.
+    if (mainFile.empty() && !isQmlPackage)
+        mainFile = moduleName;
+
+    if (!mainFile.empty()) {
+        if (!isQmlPackage && mainFile.find('.') == std::string::npos) {
+            // Windows first: this chain is the shape that has repeatedly let a
+            // Windows build fall through to the Unix branch.
+#if defined(_WIN32)
+            mainFile += ".dll";
+#elif defined(__APPLE__)
+            mainFile += ".dylib";
+#else
+            mainFile += ".so";
+#endif
+        }
+        fs::path mainPath = dir / mainFile;
+        if (fs::exists(mainPath))
+            return mainPath.string();
+
+        // The manifest named a main file that is not in the payload. The copy
+        // itself succeeded, so this is a packaging defect rather than an
+        // install failure — report the directory (below) but say so, instead
+        // of silently handing back an empty path that reads as "install
+        // failed". ui_qml is excluded: for those the name is only a guess.
+        if (!isQmlPackage) {
+            std::cerr << "Warning: package '" << moduleName << "' has no main file at "
+                      << mainPath.string() << " after install; the package declares '"
+                      << mainFile << "' but it is not in the payload. Reporting the "
+                      << "module directory instead.\n";
+        }
+    }
+
+    std::error_code ec;
+    if (fs::is_directory(dir, ec) && !ec)
+        return dir.string();
+    return {};
 }
 
 namespace {

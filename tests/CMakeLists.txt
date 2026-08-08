@@ -6,6 +6,7 @@ add_executable(lgpm_tests
     test_scanning.cpp
     test_scan_dedup.cpp
     test_signature.cpp
+    test_installed_path.cpp
     test_dependency_resolution.cpp
     test_uninstall.cpp
     test_path_traversal.cpp
