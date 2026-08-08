@@ -19,6 +19,56 @@
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 
+// Windows refuses to delete a file carrying FILE_ATTRIBUTE_READONLY. POSIX
+// consults only the PARENT DIRECTORY's write bit, so a payload file shipped
+// mode 0444 removes fine on Linux and macOS and denies on Windows -- which is
+// why this was invisible until a package was installed there.
+//
+// Everything in the Nix store is 0444, and nix-bundle-lgx copies a module's
+// `icon:` straight out of it, so every .lgx with an icon carries at least one
+// read-only file. Measured on the extracted payload: the root `hello.svg` was
+// "ReadOnly, Archive" while both DLLs, the manifests, the qmldir and even
+// `icons/hello.svg` were plain "Archive".
+//
+// `fs::permissions` is the portable spelling of "clear the read-only bit" --
+// deliberately NOT <windows.h>, whose `interface` macro and TokenSource
+// enumerator have twice broken unrelated files in this codebase.
+static void clearReadOnlyRecursive(const fs::path& root) {
+    std::error_code ec;
+    if (!fs::exists(root, ec)) return;
+    fs::permissions(root, fs::perms::owner_write, fs::perm_options::add, ec);
+    if (!fs::is_directory(root, ec)) return;
+    for (fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec), end;
+         it != end; it.increment(ec)) {
+        if (ec) break;
+        fs::permissions(it->path(), fs::perms::owner_write, fs::perm_options::add, ec);
+        ec.clear();   // one stubborn entry must not abandon the rest
+    }
+}
+
+// Remove a tree without ever throwing. The THROWING overload of remove_all is
+// what turned a failed temp-directory cleanup into an uncaught
+// std::filesystem_error: in the lgpm CLI it reached terminate(), and inside the
+// package_manager module it unwound out of the call so the install reply was
+// never sent -- the files were all on disk and the UI still showed "Retry".
+//
+// A temp directory that will not delete is untidy, never a reason to fail an
+// install that has already succeeded.
+static bool removeTreeQuietly(const fs::path& p) {
+    std::error_code ec;
+    fs::remove_all(p, ec);
+    if (!ec) return true;
+    clearReadOnlyRecursive(p);          // second attempt, attributes cleared
+    ec.clear();
+    fs::remove_all(p, ec);
+    if (ec) {
+        std::cerr << "Warning: could not remove " << p.string() << ": " << ec.message()
+                  << " (leaving it behind; this does not affect the install)" << std::endl;
+        return false;
+    }
+    return true;
+}
+
 static std::vector<std::string> splitString(const std::string& s, char delim) {
     std::vector<std::string> parts;
     std::istringstream iss(s);
@@ -242,7 +292,7 @@ std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, 
     }
 
     if (!extractLgxPackage(pluginPath, tempDir, errorMsg)) {
-        fs::remove_all(tempDir);
+        removeTreeQuietly(tempDir);
         return {};
     }
 
@@ -287,7 +337,7 @@ std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, 
         errorMsg = isCoreModule
             ? "User modules directory is not set. Cannot install plugin."
             : "User UI plugins directory is not set. Cannot install plugin.";
-        fs::remove_all(tempDir);
+        removeTreeQuietly(tempDir);
         return {};
     }
 
@@ -296,13 +346,13 @@ std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, 
     fs::create_directories(installDir, ec);
     if (ec) {
         errorMsg = "Failed to create install directory: " + installDir;
-        fs::remove_all(tempDir);
+        removeTreeQuietly(tempDir);
         return {};
     }
 
     std::string installedModuleName;
     if (!copyLibraryFromExtracted(tempDir, installDir, isCoreModule, installedModuleName, errorMsg)) {
-        fs::remove_all(tempDir);
+        removeTreeQuietly(tempDir);
         return {};
     }
 
@@ -316,7 +366,7 @@ std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, 
             platformVariantsToTry());
     }
 
-    fs::remove_all(tempDir);
+    removeTreeQuietly(tempDir);
     return installDir;
 }
 
@@ -864,7 +914,19 @@ UninstallResult PackageManagerLib::uninstallPackage(const std::string& packageNa
         return result;
     }
 
+    // Same read-only trap as the temp cleanup above, but here the failure is
+    // load-bearing rather than cosmetic: an installed package whose icon came
+    // out of the Nix store carries FILE_ATTRIBUTE_READONLY, so on Windows every
+    // uninstall and every upgrade failed with
+    //   "Failed to remove install directory: Access is denied"
+    // while the same call succeeds on POSIX, which needs only the parent
+    // directory's write bit. Clear the attributes and retry before reporting.
     std::uintmax_t removed = fs::remove_all(toDelete, ec);
+    if (ec) {
+        clearReadOnlyRecursive(toDelete);
+        ec.clear();
+        removed = fs::remove_all(toDelete, ec);
+    }
     if (ec) {
         result.errorMsg = "Failed to remove install directory: " + ec.message();
         return result;
