@@ -64,6 +64,7 @@ struct InstalledPackage {
     std::string license;
     std::string icon;
     std::string view;
+    std::string manifestVersion;
     std::vector<std::string> dependencies;
     Hashes hashes;
     InstallType installType;
