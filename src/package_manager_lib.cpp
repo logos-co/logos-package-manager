@@ -19,6 +19,56 @@
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 
+// Windows refuses to delete a file carrying FILE_ATTRIBUTE_READONLY. POSIX
+// consults only the PARENT DIRECTORY's write bit, so a payload file shipped
+// mode 0444 removes fine on Linux and macOS and denies on Windows -- which is
+// why this was invisible until a package was installed there.
+//
+// Everything in the Nix store is 0444, and nix-bundle-lgx copies a module's
+// `icon:` straight out of it, so every .lgx with an icon carries at least one
+// read-only file. Measured on the extracted payload: the root `hello.svg` was
+// "ReadOnly, Archive" while both DLLs, the manifests, the qmldir and even
+// `icons/hello.svg` were plain "Archive".
+//
+// `fs::permissions` is the portable spelling of "clear the read-only bit" --
+// deliberately NOT <windows.h>, whose `interface` macro and TokenSource
+// enumerator have twice broken unrelated files in this codebase.
+static void clearReadOnlyRecursive(const fs::path& root) {
+    std::error_code ec;
+    if (!fs::exists(root, ec)) return;
+    fs::permissions(root, fs::perms::owner_write, fs::perm_options::add, ec);
+    if (!fs::is_directory(root, ec)) return;
+    for (fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec), end;
+         it != end; it.increment(ec)) {
+        if (ec) break;
+        fs::permissions(it->path(), fs::perms::owner_write, fs::perm_options::add, ec);
+        ec.clear();   // one stubborn entry must not abandon the rest
+    }
+}
+
+// Remove a tree without ever throwing. The THROWING overload of remove_all is
+// what turned a failed temp-directory cleanup into an uncaught
+// std::filesystem_error: in the lgpm CLI it reached terminate(), and inside the
+// package_manager module it unwound out of the call so the install reply was
+// never sent -- the files were all on disk and the UI still showed "Retry".
+//
+// A temp directory that will not delete is untidy, never a reason to fail an
+// install that has already succeeded.
+static bool removeTreeQuietly(const fs::path& p) {
+    std::error_code ec;
+    fs::remove_all(p, ec);
+    if (!ec) return true;
+    clearReadOnlyRecursive(p);          // second attempt, attributes cleared
+    ec.clear();
+    fs::remove_all(p, ec);
+    if (ec) {
+        std::cerr << "Warning: could not remove " << p.string() << ": " << ec.message()
+                  << " (leaving it behind; this does not affect the install)" << std::endl;
+        return false;
+    }
+    return true;
+}
+
 static std::vector<std::string> splitString(const std::string& s, char delim) {
     std::vector<std::string> parts;
     std::istringstream iss(s);
@@ -174,7 +224,12 @@ std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, 
                                 if (!installedVersion.empty() && versionGreaterOrEqual(installedVersion, incomingVersion)) {
                                     std::string existingDir = (fs::path(baseDir) / incomingName).string();
                                     if (installedPluginPath) *installedPluginPath = existingDir;
-                                    if (isCoreModuleOut) *isCoreModuleOut = false;
+                                    // Read the type off the manifest we just parsed. This used to
+                                    // be hardcoded false, so a skipped CORE install reported
+                                    // isCoreModule=false and package_manager_module emitted
+                                    // uiPluginFileInstalled for a core module — Basecamp then
+                                    // rescanned UI plugins instead of refreshing core modules.
+                                    if (isCoreModuleOut) *isCoreModuleOut = (doc.value("type", "") == "core");
                                     return existingDir;
                                 }
                             } catch (...) {
@@ -237,7 +292,7 @@ std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, 
     }
 
     if (!extractLgxPackage(pluginPath, tempDir, errorMsg)) {
-        fs::remove_all(tempDir);
+        removeTreeQuietly(tempDir);
         return {};
     }
 
@@ -282,7 +337,7 @@ std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, 
         errorMsg = isCoreModule
             ? "User modules directory is not set. Cannot install plugin."
             : "User UI plugins directory is not set. Cannot install plugin.";
-        fs::remove_all(tempDir);
+        removeTreeQuietly(tempDir);
         return {};
     }
 
@@ -291,65 +346,102 @@ std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, 
     fs::create_directories(installDir, ec);
     if (ec) {
         errorMsg = "Failed to create install directory: " + installDir;
-        fs::remove_all(tempDir);
+        removeTreeQuietly(tempDir);
         return {};
     }
 
     std::string installedModuleName;
     if (!copyLibraryFromExtracted(tempDir, installDir, isCoreModule, installedModuleName, errorMsg)) {
-        fs::remove_all(tempDir);
+        removeTreeQuietly(tempDir);
         return {};
     }
 
-    // Determine the installed main file path
+    // Determine the path we report for what was just installed. This is the
+    // main file when the package ships one and the module directory otherwise;
+    // it is never empty here, because copyLibraryFromExtracted() has just
+    // created that directory.
     if (installedPluginPath) {
-        *installedPluginPath = {};
-        std::string mainFile;
-        bool isQmlPackage = (detectedType == "ui_qml");
-        fs::path installedManifestPath = fs::path(installDir) / installedModuleName / "manifest.json";
-        if (fs::exists(installedManifestPath)) {
-            std::ifstream mf(installedManifestPath);
-            if (mf.is_open()) {
-                try {
-                    json doc = json::parse(mf);
-                    if (doc.contains("main")) {
-                        if (doc["main"].is_object()) {
-                            for (const auto& v : platformVariantsToTry()) {
-                                if (doc["main"].contains(v)) {
-                                    mainFile = doc["main"][v].get<std::string>();
-                                    if (!mainFile.empty())
-                                        break;
-                                }
+        *installedPluginPath = resolveInstalledPackagePath(
+            (fs::path(installDir) / installedModuleName).string(),
+            platformVariantsToTry());
+    }
+
+    removeTreeQuietly(tempDir);
+    return installDir;
+}
+
+std::string PackageManagerLib::resolveInstalledPackagePath(const std::string& moduleDir,
+                                                           const std::vector<std::string>& variants)
+{
+    fs::path dir(moduleDir);
+    const std::string moduleName = dir.filename().string();
+
+    std::string mainFile;
+    bool isQmlPackage = false;
+
+    fs::path manifestPath = dir / "manifest.json";
+    if (fs::exists(manifestPath)) {
+        std::ifstream mf(manifestPath);
+        if (mf.is_open()) {
+            try {
+                json doc = json::parse(mf);
+                isQmlPackage = (doc.value("type", "") == "ui_qml");
+                if (doc.contains("main")) {
+                    if (doc["main"].is_object()) {
+                        for (const auto& v : variants) {
+                            if (doc["main"].contains(v)) {
+                                mainFile = doc["main"][v].get<std::string>();
+                                if (!mainFile.empty())
+                                    break;
                             }
-                        } else if (doc["main"].is_string()) {
-                            mainFile = doc["main"].get<std::string>();
                         }
+                    } else if (doc["main"].is_string()) {
+                        mainFile = doc["main"].get<std::string>();
                     }
-                } catch (...) {}
-            }
-        }
-        if (mainFile.empty() && !isQmlPackage) {
-            mainFile = installedModuleName;
-        }
-        if (!mainFile.empty()) {
-            if (!isQmlPackage && mainFile.find('.') == std::string::npos) {
-#if defined(__APPLE__)
-                mainFile += ".dylib";
-#elif defined(_WIN32)
-                mainFile += ".dll";
-#else
-                mainFile += ".so";
-#endif
-            }
-            fs::path mainPath = fs::path(installDir) / installedModuleName / mainFile;
-            if (fs::exists(mainPath)) {
-                *installedPluginPath = mainPath.string();
-            }
+                }
+            } catch (...) {}
         }
     }
 
-    fs::remove_all(tempDir);
-    return installDir;
+    // Only non-ui_qml packages get a main file synthesised from the module
+    // name: a QML-only ui_qml package has no backend library at all, and
+    // guessing "<name>.so" for it would just miss.
+    if (mainFile.empty() && !isQmlPackage)
+        mainFile = moduleName;
+
+    if (!mainFile.empty()) {
+        if (!isQmlPackage && mainFile.find('.') == std::string::npos) {
+            // Windows first: this chain is the shape that has repeatedly let a
+            // Windows build fall through to the Unix branch.
+#if defined(_WIN32)
+            mainFile += ".dll";
+#elif defined(__APPLE__)
+            mainFile += ".dylib";
+#else
+            mainFile += ".so";
+#endif
+        }
+        fs::path mainPath = dir / mainFile;
+        if (fs::exists(mainPath))
+            return mainPath.string();
+
+        // The manifest named a main file that is not in the payload. The copy
+        // itself succeeded, so this is a packaging defect rather than an
+        // install failure — report the directory (below) but say so, instead
+        // of silently handing back an empty path that reads as "install
+        // failed". ui_qml is excluded: for those the name is only a guess.
+        if (!isQmlPackage) {
+            std::cerr << "Warning: package '" << moduleName << "' has no main file at "
+                      << mainPath.string() << " after install; the package declares '"
+                      << mainFile << "' but it is not in the payload. Reporting the "
+                      << "module directory instead.\n";
+        }
+    }
+
+    std::error_code ec;
+    if (fs::is_directory(dir, ec) && !ec)
+        return dir.string();
+    return {};
 }
 
 namespace {
@@ -822,7 +914,19 @@ UninstallResult PackageManagerLib::uninstallPackage(const std::string& packageNa
         return result;
     }
 
+    // Same read-only trap as the temp cleanup above, but here the failure is
+    // load-bearing rather than cosmetic: an installed package whose icon came
+    // out of the Nix store carries FILE_ATTRIBUTE_READONLY, so on Windows every
+    // uninstall and every upgrade failed with
+    //   "Failed to remove install directory: Access is denied"
+    // while the same call succeeds on POSIX, which needs only the parent
+    // directory's write bit. Clear the attributes and retry before reporting.
     std::uintmax_t removed = fs::remove_all(toDelete, ec);
+    if (ec) {
+        clearReadOnlyRecursive(toDelete);
+        ec.clear();
+        removed = fs::remove_all(toDelete, ec);
+    }
     if (ec) {
         result.errorMsg = "Failed to remove install directory: " + ec.message();
         return result;
@@ -834,8 +938,29 @@ UninstallResult PackageManagerLib::uninstallPackage(const std::string& packageNa
     return result;
 }
 
+namespace {
+// Deliberately a plain global rather than something inferred from the
+// environment: a silent platform switch would defeat the fail-closed check that
+// stops a Windows package being installed as a Linux one.
+std::string g_platformVariantOverride;
+}
+
+void PackageManagerLib::setPlatformVariantOverride(const std::string& variant)
+{
+    g_platformVariantOverride = variant;
+}
+
+std::string PackageManagerLib::platformVariantOverride()
+{
+    return g_platformVariantOverride;
+}
+
 std::string PackageManagerLib::currentPlatformVariant()
 {
+    if (!g_platformVariantOverride.empty()) {
+        return g_platformVariantOverride;
+    }
+
 #if defined(__APPLE__)
     #if defined(__aarch64__)
         return "darwin-arm64";
@@ -1158,7 +1283,14 @@ bool PackageManagerLib::copyLibraryFromExtracted(const std::string& extractedDir
         fs::path canonicalTarget = fs::weakly_canonical(fs::path(targetDir));
         fs::path canonicalSub = fs::weakly_canonical(fs::path(moduleSubDir));
         auto rel = fs::relative(canonicalSub, canonicalTarget);
-        if (rel.empty() || rel.native().rfind("..", 0) == 0) {
+        // Compare the first COMPONENT rather than doing a string prefix test.
+        // fs::path::native() is std::wstring on Windows, so rfind("..", 0) does
+        // not even compile there -- and the prefix test was imprecise anyway: it
+        // also matched a legitimate directory literally named "..foo", rejecting
+        // a path that does not actually escape. Component comparison is portable
+        // and exact. (Short-circuits, so *rel.begin() is only reached when rel
+        // is non-empty.)
+        if (rel.empty() || *rel.begin() == fs::path("..")) {
             errorMsg = "Resolved install path escapes target directory: " + moduleSubDir;
             return false;
         }

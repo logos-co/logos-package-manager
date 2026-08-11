@@ -139,15 +139,44 @@ public:
     std::vector<std::string> allDirectories() const;
 
     // Install from local LGX file
-    // Returns installed path, or empty string on error (sets errorMsg).
-    // If installedPluginPath is non-null, receives the full path to the
-    // installed main file. For ui_qml packages this is the optional backend
-    // plugin path only and may be empty.
+    // Returns the install ROOT (the configured user modules / UI plugins
+    // directory), or empty string on error (sets errorMsg).
+    //
+    // If installedPluginPath is non-null, receives the path identifying what
+    // was installed — see resolveInstalledPackagePath() for the exact rule.
+    // It is NEVER empty when this function reports success, so callers may
+    // use it as the "something was installed" signal. It is the installed
+    // main FILE when the package ships one, and the installed module
+    // DIRECTORY otherwise (a QML-only ui_qml package legitimately has no
+    // backend library, so its manifest carries an empty "main").
+    //
     // If isCoreModule is non-null, receives whether the module type is "core".
     std::string installPluginFile(const std::string& pluginPath, std::string& errorMsg,
                                   bool skipIfNotNewerVersion = false,
                                   std::string* installedPluginPath = nullptr,
                                   bool* isCoreModule = nullptr);
+
+    // Decide what installPluginFile() reports for a package that has just
+    // been copied into `moduleDir` (= <installRoot>/<moduleName>). `variants`
+    // is normally platformVariantsToTry().
+    //
+    // Returns <moduleDir>/<main> when the installed manifest.json names a main
+    // file for this platform AND that file is present; otherwise returns
+    // `moduleDir` itself. Only returns empty when `moduleDir` does not exist.
+    //
+    // The directory fallback is the fix for a real defect: a QML-only ui_qml
+    // package has "main": {}, so this used to yield an empty string on a
+    // completely successful install. Callers treat an empty path as failure —
+    // logos-package-manager-ui rendered a red RETRY, and
+    // package_manager_module skipped its uiPluginFileInstalled event, so the
+    // freshly installed plugin only appeared after an app restart.
+    //
+    // Exposed publicly so the behaviour can be unit-tested directly: the
+    // "main": {} shape cannot be produced through liblgx's C API (lgx_add_variant
+    // only allows a main-less directory variant when the package manifest
+    // already declares type "ui_qml", and there is no lgx_set_type()).
+    static std::string resolveInstalledPackagePath(const std::string& moduleDir,
+                                                   const std::vector<std::string>& variants);
 
     // Module scanning — returns the scanned packages as populated structs.
     // Each struct carries all manifest.json fields plus the resolved
@@ -193,6 +222,17 @@ public:
                                   bool isCoreModule, std::string& outModuleName, std::string& errorMsg);
 
     // Variant selection (platform detection)
+    // Install for a platform OTHER than the one we are running on.
+    //
+    // Needed for cross-builds: the Nix install bundler runs lgpm on the Linux
+    // builder to lay out a Windows package. Without this it fail-closes with
+    // "Package does not contain variant for platform: linux-x86_64 (package
+    // provides: windows-x86_64)" -- correct behaviour, and the protection is
+    // worth keeping, so this override is EXPLICIT and never inferred. Empty
+    // string restores the compiled-in platform.
+    static void setPlatformVariantOverride(const std::string& variant);
+    static std::string platformVariantOverride();
+
     static std::string currentPlatformVariant();
     static std::vector<std::string> platformVariantsToTry();
 

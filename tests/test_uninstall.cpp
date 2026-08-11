@@ -90,3 +90,41 @@ TEST_F(UninstallTest, UserWinsWhenSameNameInBothDirs) {
     EXPECT_FALSE(fs::exists(userDir / "same"));
     EXPECT_TRUE(fs::exists(embeddedDir / "same"));
 }
+
+// The symmetric case to the QML-only INSTALL defect. Uninstall keys off the
+// scanned installDir and the manifest "type" — never off "main" — so a
+// QML-only ui_qml package (no backend library, empty "main") removes cleanly
+// and is classified as a UI plugin. This test exists to keep it that way.
+TEST_F(UninstallTest, UninstallsQmlOnlyUiPackage) {
+    fs::path uiDir = embeddedDir.parent_path() / "user_ui";
+    fs::create_directories(uiDir / "hello_ui");
+    {
+        json manifest;
+        manifest["name"] = "hello_ui";
+        manifest["type"] = "ui_qml";
+        manifest["version"] = "1.0.0";
+        manifest["view"] = "Main.qml";
+        manifest["main"] = json::object();   // QML-only: no backend library
+        std::ofstream mf(uiDir / "hello_ui" / "manifest.json");
+        mf << manifest.dump(2);
+    }
+    std::ofstream(uiDir / "hello_ui" / "Main.qml") << "import QtQuick\nItem {}\n";
+    std::ofstream(uiDir / "hello_ui" / "qmldir") << "module hello_ui\n";
+
+    PackageManagerLib pm;
+    pm.setUserUiPluginsDirectory(uiDir.string());
+
+    // It must be visible to the UI-plugin scan (that is what drives the
+    // sidebar) even with an empty mainFilePath.
+    auto uiPlugins = pm.getInstalledUiPlugins();
+    ASSERT_EQ(uiPlugins.size(), 1u);
+    EXPECT_EQ(uiPlugins[0].name, "hello_ui");
+    EXPECT_EQ(uiPlugins[0].type, "ui_qml");
+    EXPECT_TRUE(uiPlugins[0].mainFilePath.empty());
+
+    UninstallResult r = pm.uninstallPackage("hello_ui");
+    EXPECT_TRUE(r.success) << r.errorMsg;
+    EXPECT_FALSE(fs::exists(uiDir / "hello_ui"));
+    ASSERT_EQ(r.removedFiles.size(), 1u);
+    EXPECT_EQ(r.removedFiles[0], (uiDir / "hello_ui").string());
+}

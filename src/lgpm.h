@@ -57,9 +57,11 @@ LGPM_EXPORT void lgpm_set_user_ui_plugins_dir(lgpm_context_t ctx, const char* di
 /**
  * Install from local LGX file.
  * Returns installed directory path (caller frees with lgpm_free_string), or NULL on error.
- * If installed_plugin_path is non-NULL, it receives the full path to the installed main file
- * (caller frees with lgpm_free_string). For ui_qml packages this is the optional
- * backend plugin path only and may be empty.
+ * If installed_plugin_path is non-NULL, it receives the path identifying what was installed
+ * (caller frees with lgpm_free_string): the installed main file when the package ships one,
+ * and the installed module DIRECTORY otherwise (a QML-only ui_qml package has no backend
+ * library, so its manifest carries an empty "main"). It is never empty when this call
+ * succeeds, so it may be used as the "something was installed" signal.
  * If is_core_module is non-NULL, it receives whether the module type is "core".
  */
 LGPM_EXPORT char* lgpm_install_file(lgpm_context_t ctx, const char* lgx_path, bool skip_if_not_newer,
