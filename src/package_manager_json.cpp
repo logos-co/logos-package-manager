@@ -18,6 +18,7 @@ void to_json(nlohmann::json& j, const InstalledPackage& p)
     j["license"]      = p.license;
     j["icon"]         = p.icon;
     j["view"]         = p.view;
+    j["manifestVersion"] = p.manifestVersion;
     j["dependencies"] = p.dependencies;
     j["hashes"]       = p.hashes;
     j["installType"]  = installTypeToString(p.installType);

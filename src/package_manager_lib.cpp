@@ -544,6 +544,7 @@ static InstalledPackage scanToInstalledPackage(const ScanEntry& scan)
     p.license     = m.value("license", "");
     p.icon        = m.value("icon", "");
     p.view        = m.value("view", "");
+    p.manifestVersion = m.value("manifestVersion", "");
 
     if (m.contains("hashes") && m["hashes"].is_object()) {
         p.hashes.root = m["hashes"].value("root", "");
