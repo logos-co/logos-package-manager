@@ -164,11 +164,16 @@ jobs:
       cancel-in-progress: false
 
     steps:
-      - name: Download all reports
+      - name: Download the reports
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-          # No `name:` → downloads every artifact into artifacts/<name>/...
+          # A `pattern:` rather than nothing, now that the run carries more than
+          # reports. Without it this step also pulls the Windows job's staged
+          # tree — lgpm.exe and its 18 DLLs — and the raw execution records,
+          # neither of which this job reads. Each artifact still lands in
+          # artifacts/<name>/, which is what the loop below expects.
+          pattern: lgpm-doctest-reports-*
 
       - name: Arrange site directory
         id: arrange
