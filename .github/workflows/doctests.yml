@@ -120,9 +120,35 @@ jobs:
           path: ${{ runner.temp }}/reports/
           if-no-files-found: warn
 
+  # ────────────────────────────────────────────────────────────────────────
+  # The Windows leg. It is a job HERE rather than its own workflow for one
+  # concrete reason: actions/download-artifact scopes to the CURRENT WORKFLOW
+  # RUN unless given a run-id and an elevated token, so a report uploaded by a
+  # separate workflow is invisible to publish-report below. Same run, same
+  # artifact namespace, no cross-run plumbing.
+  #
+  # It is not just a doc-test leg: the reusable workflow cross-builds the
+  # Windows target, gates the PE format and the import closure, hands the tree
+  # to a real windows-latest runner and executes there. That is why this repo
+  # needs no separate windows.yml -- this call covers it.
+  #
+  # The steps it runs are doctests/lgpm-cli.test.yaml's own, marked
+  # `platform: windows`; the build sections are marked for linux/macos and run
+  # in the matrix above. Neither half is duplicated.
+  windows:
+    name: Windows (cross-build, gates, doc-test leg)
+    uses: logos-co/logos-windows-ci/.github/workflows/windows-ci.yml@v1
+    secrets: inherit
+    with:
+      targets: cli
+      doctest-spec: doctests/lgpm-cli.test.yaml
+      doctest-artifact: lgpm-doctest-reports
+
   publish-report:
     name: Publish reports to GitHub Pages
-    needs: doctests
+    # `always()` below covers a FAILING windows leg: its report is uploaded on
+    # failure too, and a failing run is when the report is most worth reading.
+    needs: [doctests, windows]
     # Run even when tests fail — a failing run is exactly when you want to open
     # the report. Skip on forks, where GITHUB_TOKEN can't push or comment.
     if: ${{ always() && github.event.pull_request.head.repo.fork != true }}
@@ -138,11 +164,16 @@ jobs:
       cancel-in-progress: false
 
     steps:
-      - name: Download all reports
+      - name: Download the reports
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-          # No `name:` → downloads every artifact into artifacts/<name>/...
+          # A `pattern:` rather than nothing, now that the run carries more than
+          # reports. Without it this step also pulls the Windows job's staged
+          # tree — lgpm.exe and its 18 DLLs — and the raw execution records,
+          # neither of which this job reads. Each artifact still lands in
+          # artifacts/<name>/, which is what the loop below expects.
+          pattern: lgpm-doctest-reports-*
 
       - name: Arrange site directory
         id: arrange
@@ -158,7 +189,16 @@ jobs:
 
           mkdir -p "site/$BASE"
           found=""
-          for os in ubuntu-latest macos-latest; do
+          # windows-latest is produced by a DIFFERENT workflow (windows.yml,
+          # which calls logos-windows-ci) rather than by this file's matrix --
+          # its steps are cross-built here and executed on a Windows runner, so
+          # they cannot be one more leg of the matrix above. It lands in the same
+          # artifact-name shape, so publishing it is just one more name here.
+          #
+          # A missing one is not an error: this workflow also runs on refs where
+          # the Windows job did not, and the `-f` test below already skips
+          # whatever is absent.
+          for os in ubuntu-latest macos-latest windows-latest; do
             src="artifacts/lgpm-doctest-reports-$os"
             # Each OS now produces a single combined report (index.html) whose
             # built-in dropdown switches between specs — just publish it as-is.
@@ -177,7 +217,7 @@ jobs:
             echo "<style>body{font:16px system-ui;margin:40px;max-width:640px}a{color:#2563eb}</style>"
             echo "<h1>lgpm doc-test reports</h1>"
             echo "<p><strong>$BASE</strong> · commit <code>${GITHUB_SHA::7}</code></p><ul>"
-            for os in ubuntu-latest macos-latest; do
+            for os in ubuntu-latest macos-latest windows-latest; do
               if [ -d "site/$BASE/$os" ]; then
                 echo "<li><a href=\"./$os/\">$os</a></li>"
               fi
