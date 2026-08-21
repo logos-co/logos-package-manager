@@ -6,6 +6,21 @@ void to_json(nlohmann::json& j, const Hashes& h)
     j["root"] = h.root;
 }
 
+// Emits the entry in the same minimal form the LGX manifest uses: a bare name
+// serialises as a plain string, a constrained one as an object. Matches
+// lgx::Manifest::toJson so a manifest round-trips through lgpm unchanged.
+void to_json(nlohmann::json& j, const PackageDependency& d)
+{
+    if (d.isSimple()) {
+        j = d.name;
+        return;
+    }
+    j = nlohmann::json::object();
+    j["name"] = d.name;
+    if (d.version) j["version"] = *d.version;
+    if (d.signer)  j["signer"]  = *d.signer;
+}
+
 void to_json(nlohmann::json& j, const InstalledPackage& p)
 {
     j = nlohmann::json::object();
@@ -19,7 +34,14 @@ void to_json(nlohmann::json& j, const InstalledPackage& p)
     j["icon"]         = p.icon;
     j["view"]         = p.view;
     j["manifestVersion"] = p.manifestVersion;
+    // `dependencies` stays a flat array of NAMES — the shape every consumer
+    // and doctest already reads. Object-form manifest entries now contribute
+    // their name here like any other edge (they used to be dropped entirely).
     j["dependencies"] = p.dependencies;
+    // Additive: present only when at least one entry declared a version range
+    // or a signer DID, so today's manifests serialise byte-identically.
+    if (!p.dependencyConstraints.empty())
+        j["dependencyConstraints"] = p.dependencyConstraints;
     j["hashes"]       = p.hashes;
     j["installType"]  = installTypeToString(p.installType);
     j["installDir"]   = p.installDir;

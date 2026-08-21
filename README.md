@@ -41,6 +41,16 @@ std::vector<InstalledPackage> all       = pm.getInstalledPackages();    // all t
 // transitive list build it over resolveDependencies / resolveDependents
 // (see the `lgpm` CLI `deps` / `dependents` subcommands for a reference
 // implementation — ~15 lines of BFS with a seen-set).
+//
+// A manifest `dependencies[]` entry is either a plain name or an object
+// { name, version?, signer? } (LGX spec, "Dependency entries"). Both forms
+// declare the same edge, so `dependencies` lists the NAME of every entry.
+// The entries that also declared a semver range or a signer DID are repeated
+// in `dependencyConstraints` with the constraint attached; the library records
+// them but does not evaluate them (that is the resolver's job, in
+// logos-package-downloader).
+for (const PackageDependency& c : pkg.dependencyConstraints)
+    std::cout << c.toString() << "\n";   // e.g. waku_module ^1.2.0 [signer=did:jwk:…]
 
 // Dependency graph as a rich struct tree. Returns std::nullopt when the
 // package is not installed. Children with status == NotInstalled are

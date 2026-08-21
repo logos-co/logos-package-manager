@@ -406,3 +406,225 @@ TEST_F(DependencyResolutionTest, DependenciesFlat_CrossCategory) {
     ASSERT_EQ(deps.size(), 1u);
     EXPECT_EQ(deps[0], "core_b");
 }
+
+// ---------------------------------------------------------------------------
+// Object-form dependency entries.
+//
+// The LGX spec (logos-package docs/spec.md, "Dependency entries") allows each
+// element of `dependencies[]` to be either a plain string or an object
+// {name, version?, signer?}. The scan used to accept only the string form with
+// no else branch, so an object entry lost THE EDGE ITSELF: it vanished from
+// resolveDependencies, from resolveDependents (an uninstall stopped warning
+// about a dependent that declared its need in object form), and from the
+// installed-package `dependencies` array basecamp derives its missing-dep
+// marker from. No workspace manifest uses the object form, which is why
+// nothing caught it — so these tests write the object form directly.
+// ---------------------------------------------------------------------------
+
+// Writes a manifest whose `dependencies` array is supplied verbatim, so a test
+// can mix plain-string and object entries exactly as an .lgx manifest may.
+static void writeManifestRawDeps(const fs::path& parentDir,
+                                 const std::string& name,
+                                 const json& deps,
+                                 const std::string& version = "1.0.0") {
+    fs::path dir = parentDir / name;
+    fs::create_directories(dir);
+    json manifest;
+    manifest["name"] = name;
+    manifest["type"] = "core";
+    manifest["version"] = version;
+    manifest["dependencies"] = deps;
+    std::ofstream mf(dir / "manifest.json");
+    mf << manifest.dump(2);
+}
+
+TEST_F(DependencyResolutionTest, ObjectFormDependencyKeepsForwardEdge) {
+    writeManifestRawDeps(modulesDir, "app",
+                         json::array({ json{{"name", "lib"}, {"version", "^1.2.0"}} }));
+    writeManifest(modulesDir, "lib", "core", {}, "1.5.0");
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(modulesDir.string());
+
+    auto tree = pm.resolveDependencies("app");
+    ASSERT_TRUE(tree);
+    ASSERT_EQ(tree->children.size(), 1u);
+    EXPECT_EQ(tree->children[0].name, "lib");
+    EXPECT_EQ(tree->children[0].status, DependencyStatus::Installed);
+}
+
+TEST_F(DependencyResolutionTest, ObjectFormDependencyKeepsReverseEdge) {
+    // The uninstall-safety direction: removing "lib" must still report "app".
+    writeManifestRawDeps(modulesDir, "app",
+                         json::array({ json{{"name", "lib"}, {"version", "^1.2.0"}} }));
+    writeManifest(modulesDir, "lib", "core", {}, "1.5.0");
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(modulesDir.string());
+
+    auto tree = pm.resolveDependents("lib");
+    ASSERT_TRUE(tree);
+    ASSERT_EQ(tree->children.size(), 1u);
+    EXPECT_EQ(tree->children[0].name, "app");
+}
+
+TEST_F(DependencyResolutionTest, ObjectFormMissingDependencyIsStillReportedMissing) {
+    // The basecamp red-cross path: an object-form dep that is NOT installed
+    // must surface as not_installed, not as "no dependencies at all".
+    writeManifestRawDeps(modulesDir, "app",
+                         json::array({ json{{"name", "absent"}, {"version", "^2.0.0"}} }));
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(modulesDir.string());
+
+    auto tree = pm.resolveDependencies("app");
+    ASSERT_TRUE(tree);
+    ASSERT_EQ(tree->children.size(), 1u);
+    EXPECT_EQ(tree->children[0].name, "absent");
+    EXPECT_EQ(tree->children[0].status, DependencyStatus::NotInstalled);
+}
+
+TEST_F(DependencyResolutionTest, MixedStringAndObjectDependenciesBothResolve) {
+    writeManifestRawDeps(modulesDir, "app",
+                         json::array({ "plain",
+                                       json{{"name", "ranged"}, {"version", ">=1.0.0"}},
+                                       json{{"name", "pinned"},
+                                            {"signer", "did:jwk:eyJrdHkiOiJPS1AifQ"}} }));
+    writeManifest(modulesDir, "plain",  "core", {});
+    writeManifest(modulesDir, "ranged", "core", {});
+    writeManifest(modulesDir, "pinned", "core", {});
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(modulesDir.string());
+
+    auto deps = dependenciesFlat(pm, "app", false);
+    std::set<std::string> asSet(deps.begin(), deps.end());
+    EXPECT_EQ(asSet.size(), 3u);
+    EXPECT_TRUE(asSet.count("plain"));
+    EXPECT_TRUE(asSet.count("ranged"));
+    EXPECT_TRUE(asSet.count("pinned"));
+}
+
+TEST_F(DependencyResolutionTest, ObjectFormConstraintsAreCarriedNotJustTheName) {
+    // The name alone restores the graph; the range and signer are what make the
+    // constraint reachable to anything that evaluates it.
+    writeManifestRawDeps(modulesDir, "app",
+                         json::array({ "plain",
+                                       json{{"name", "ranged"}, {"version", "^1.2.0"}},
+                                       json{{"name", "pinned"},
+                                            {"version", ">=0.5.0"},
+                                            {"signer", "did:jwk:eyJrdHkiOiJPS1AifQ"}} }));
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(modulesDir.string());
+
+    auto pkgs = pm.getInstalledPackages();
+    auto it = std::find_if(pkgs.begin(), pkgs.end(),
+                           [](const InstalledPackage& p) { return p.name == "app"; });
+    ASSERT_NE(it, pkgs.end());
+
+    // Every edge is present in the name list, in declared order.
+    ASSERT_EQ(it->dependencies.size(), 3u);
+    EXPECT_EQ(it->dependencies[0], "plain");
+    EXPECT_EQ(it->dependencies[1], "ranged");
+    EXPECT_EQ(it->dependencies[2], "pinned");
+
+    // Only the constrained entries appear in the constraint list.
+    ASSERT_EQ(it->dependencyConstraints.size(), 2u);
+    EXPECT_EQ(it->dependencyConstraints[0].name, "ranged");
+    ASSERT_TRUE(it->dependencyConstraints[0].version.has_value());
+    EXPECT_EQ(*it->dependencyConstraints[0].version, "^1.2.0");
+    EXPECT_FALSE(it->dependencyConstraints[0].signer.has_value());
+
+    EXPECT_EQ(it->dependencyConstraints[1].name, "pinned");
+    ASSERT_TRUE(it->dependencyConstraints[1].version.has_value());
+    EXPECT_EQ(*it->dependencyConstraints[1].version, ">=0.5.0");
+    ASSERT_TRUE(it->dependencyConstraints[1].signer.has_value());
+    EXPECT_EQ(*it->dependencyConstraints[1].signer, "did:jwk:eyJrdHkiOiJPS1AifQ");
+}
+
+TEST_F(DependencyResolutionTest, PlainDependenciesCarryNoConstraints) {
+    writeManifest(modulesDir, "app", "core", {"lib"});
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(modulesDir.string());
+
+    auto pkgs = pm.getInstalledPackages();
+    auto it = std::find_if(pkgs.begin(), pkgs.end(),
+                           [](const InstalledPackage& p) { return p.name == "app"; });
+    ASSERT_NE(it, pkgs.end());
+    ASSERT_EQ(it->dependencies.size(), 1u);
+    EXPECT_EQ(it->dependencies[0], "lib");
+    EXPECT_TRUE(it->dependencyConstraints.empty());
+}
+
+TEST_F(DependencyResolutionTest, MalformedDependencyEntriesDeclareNoEdge) {
+    // A number, a null, and an object without a string `name` are not
+    // dependency entries in either form — they must not synthesise an edge.
+    writeManifestRawDeps(modulesDir, "app",
+                         json::array({ 42, nullptr, json::object(),
+                                       json{{"name", 7}}, "", json{{"name", ""}},
+                                       "real" }));
+    writeManifest(modulesDir, "real", "core", {});
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(modulesDir.string());
+
+    auto deps = dependenciesFlat(pm, "app", false);
+    ASSERT_EQ(deps.size(), 1u);
+    EXPECT_EQ(deps[0], "real");
+}
+
+TEST_F(DependencyResolutionTest, MalformedDependencyEntryWarnsOnStderr) {
+    // A dropped edge with no diagnostic is the failure mode this whole change
+    // is about, so the one remaining drop — a malformed entry — must announce
+    // itself. Without the warning, a manifest that bypasses lgx::Manifest
+    // validation (an embedded install written at build time, or a hand-edited
+    // manifest.json) loses a dependency and nothing anywhere says so.
+    writeManifestRawDeps(modulesDir, "app",
+                         json::array({ json{{"name", 7}}, "good" }));
+    writeManifest(modulesDir, "good", "core", {});
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(modulesDir.string());
+
+    testing::internal::CaptureStderr();
+    auto deps = dependenciesFlat(pm, "app", false);
+    std::string err = testing::internal::GetCapturedStderr();
+
+    // The good edge still resolves...
+    ASSERT_EQ(deps.size(), 1u);
+    EXPECT_EQ(deps[0], "good");
+
+    // ...and the bad one is reported rather than dropped in silence. The
+    // message must name the package and the offending entry, because the
+    // manifest that produced it is not the one the user is looking at.
+    EXPECT_NE(err.find("malformed dependencies[] entry"), std::string::npos) << err;
+    EXPECT_NE(err.find("app"), std::string::npos) << err;
+    EXPECT_NE(err.find("\"name\":7"), std::string::npos) << err;
+}
+
+TEST_F(DependencyResolutionTest, WellFormedDependenciesWarnAboutNothing) {
+    // Invariance guard: the warning must fire ONLY for entries that declare no
+    // edge. A manifest mixing both legal forms has to stay silent, or the
+    // diagnostic becomes noise and gets muted.
+    writeManifestRawDeps(modulesDir, "app",
+                         json::array({ "plain",
+                                       json{{"name", "ranged"}, {"version", "^1.2.0"}} }));
+    writeManifest(modulesDir, "plain",  "core", {});
+    writeManifest(modulesDir, "ranged", "core", {});
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(modulesDir.string());
+
+    testing::internal::CaptureStderr();
+    (void)dependenciesFlat(pm, "app", false);
+    std::string err = testing::internal::GetCapturedStderr();
+
+    // Deliberately asserts the warning ONLY, with no edge-count assertion, so
+    // this holds identically before and after the fix — a guard that only
+    // starts holding once the fix lands is not a guard. That the two entries
+    // actually resolve to two edges is MixedStringAndObjectDependenciesBothResolve's
+    // job.
+    EXPECT_EQ(err.find("malformed dependencies[] entry"), std::string::npos) << err;
+}

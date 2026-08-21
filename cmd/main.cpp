@@ -287,11 +287,17 @@ static int cmdInfo(PackageManagerLib& pm, const std::string& packageName, bool j
         std::cout << "Directory: " << found.installDir << "\n";
 
         if (!found.dependencies.empty()) {
+            // Render the declared constraint alongside the name when the
+            // manifest carried one, so `lgpm info` shows what the package
+            // actually requires rather than just who it points at.
             std::cout << "Dependencies: ";
             bool first = true;
             for (const auto& d : found.dependencies) {
                 if (!first) std::cout << ", ";
-                std::cout << d;
+                auto it = std::find_if(found.dependencyConstraints.begin(),
+                                       found.dependencyConstraints.end(),
+                                       [&](const PackageDependency& c) { return c.name == d; });
+                std::cout << (it != found.dependencyConstraints.end() ? it->toString() : d);
                 first = false;
             }
             std::cout << "\n";
