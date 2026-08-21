@@ -455,7 +455,10 @@ struct ScanEntry {
     std::string installDir;
     std::string mainFilePath;
     InstallType installType = InstallType::User;
-    std::vector<std::string> dependencies;
+    // Declared dependency entries, string and object form alike (see
+    // PackageDependency). The graph walks `.name`; the constraints ride along
+    // for consumers that evaluate them.
+    std::vector<PackageDependency> dependencies;
     json manifest;  // full manifest.json — used to emit the JSON passthrough
 };
 
@@ -589,13 +592,60 @@ static std::map<std::string, ScanEntry> enumerateManifests(
                           << "supported variants [" << joinStrings(variants, ", ") << "].\n";
             }
 
+            // A `dependencies[]` entry is either a plain string or an object
+            // carrying the same name plus the constraints an installer resolves
+            // by (see the LGX spec's "Dependency entries", and lgx::Dependency
+            // in logos-package). Both forms declare THE SAME EDGE.
+            //
+            // This used to accept only `d.is_string()` with no else branch, so
+            // an object entry was skipped entirely — the graph lost the edge,
+            // not merely its constraint. resolveDependencies under-reported,
+            // resolveDependents under-reported (so an uninstall never warned
+            // about a dependent that declared its need in object form), and
+            // basecamp's missing-dependency marker went green on a module whose
+            // dependency was not installed at all. No manifest in the workspace
+            // uses the object form today, which is exactly why it went unseen.
             if (manifest.contains("dependencies") && manifest["dependencies"].is_array()) {
                 for (const auto& d : manifest["dependencies"]) {
+                    PackageDependency dep;
                     if (d.is_string()) {
-                        std::string depName = d.get<std::string>();
-                        if (!depName.empty())
-                            scan.dependencies.push_back(depName);
+                        dep.name = d.get<std::string>();
+                    } else if (d.is_object() && d.contains("name") && d["name"].is_string()) {
+                        dep.name = d["name"].get<std::string>();
+                        if (d.contains("version") && d["version"].is_string())
+                            dep.version = d["version"].get<std::string>();
+                        if (d.contains("signer") && d["signer"].is_string())
+                            dep.signer = d["signer"].get<std::string>();
                     }
+                    // Neither form, or a name that is present but empty: the
+                    // entry declares no edge. SAY SO — dropping it silently is
+                    // the exact failure this loop was just fixed for, one notch
+                    // down. Without this line a hand-edited or build-time
+                    // embedded manifest can lose a dependency with no
+                    // diagnostic anywhere in the system, and the only symptom
+                    // is an uninstall that fails to warn, or a basecamp row
+                    // that shows green while its dependency is absent.
+                    //
+                    // Severity is low BECAUSE the `lgpm install` path cannot
+                    // reach it — logos-package rejects both shapes ahead of us:
+                    // Manifest::fromJson returns nullopt on a non-string /
+                    // non-object entry or an object without a string `name`
+                    // (so Package::load fails outright), and Manifest::validate
+                    // adds "Dependency with empty name" for the rest. What is
+                    // NOT covered is every manifest that bypasses that path:
+                    // an embedded install written at build time, and anything
+                    // edited in place afterwards. Those are exactly the cases
+                    // nobody is watching, which is why this warns rather than
+                    // trusting the upstream gate.
+                    if (dep.name.empty()) {
+                        std::cerr << "Warning: package '" << name << "' in "
+                                  << entry.path().string()
+                                  << " has a malformed dependencies[] entry " << d.dump()
+                                  << " (expected a non-empty name string, or an object with a "
+                                  << "string 'name'); the dependency edge is ignored.\n";
+                        continue;
+                    }
+                    scan.dependencies.push_back(std::move(dep));
                 }
             }
             scan.manifest = std::move(manifest);
@@ -626,7 +676,15 @@ static InstalledPackage scanToInstalledPackage(const ScanEntry& scan)
     p.installType = scan.installType;
     p.installDir  = scan.installDir;
     p.mainFilePath = scan.mainFilePath;
-    p.dependencies = scan.dependencies;
+    // Split the scanned entries into the name list every consumer already
+    // reads and the constrained subset. Built here, in one place, so the two
+    // views cannot drift.
+    p.dependencies.reserve(scan.dependencies.size());
+    for (const auto& d : scan.dependencies) {
+        p.dependencies.push_back(d.name);
+        if (!d.isSimple())
+            p.dependencyConstraints.push_back(d);
+    }
 
     const json& m = scan.manifest;
     p.displayName = m.value("display_name", "");
@@ -740,7 +798,7 @@ std::optional<DependencyTreeNode> PackageManagerLib::resolveDependencies(const s
         path.insert(name);
         node.children.reserve(scan.dependencies.size());
         for (const auto& dep : scan.dependencies) {
-            node.children.push_back(build(dep));
+            node.children.push_back(build(dep.name));
         }
         path.erase(name);
         return node;
@@ -766,7 +824,7 @@ std::optional<DependentTreeNode> PackageManagerLib::resolveDependents(const std:
     std::unordered_map<std::string, std::vector<std::string>> reverseDeps;
     for (const auto& [name, scan] : byName) {
         for (const auto& d : scan.dependencies) {
-            reverseDeps[d].push_back(name);
+            reverseDeps[d.name].push_back(name);
         }
     }
 

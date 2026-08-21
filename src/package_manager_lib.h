@@ -50,6 +50,48 @@ struct Hashes {
     std::string root;            // Merkle root over the package contents
 };
 
+// One entry of a manifest's `dependencies` array. Mirrors lgx::Dependency
+// (logos-package src/core/manifest.h) and the LGX spec's "Dependency entries"
+// section, which defines two on-disk forms:
+//
+//   plain string  "waku_module"                     -> { name }
+//   object        { "name": "waku_module",
+//                   "version"?: "^1.2.0",           -> npm-style semver range
+//                   "signer"?:  "did:jwk:..." }     -> publisher DID pin
+//
+// The distinction is NOT cosmetic: the scan used to accept only the string
+// form, so an object entry lost THE EDGE ITSELF (not merely its constraint)
+// and vanished from resolveDependencies / resolveDependents. Every consumer
+// that needs a bare name reads `.name`, which both forms populate.
+//
+// Implicitly constructible from a string so `dependencies.push_back("dep")`
+// and brace-init from a name list keep working unchanged.
+struct PackageDependency {
+    std::string name;                       // required; canonical package name
+    std::optional<std::string> version;     // semver range; absent = any version
+    std::optional<std::string> signer;      // did:jwk:...; absent = any signer
+
+    PackageDependency() = default;
+    PackageDependency(std::string n) : name(std::move(n)) {}   // NOLINT: intended implicit
+    PackageDependency(const char* n) : name(n) {}              // NOLINT: intended implicit
+
+    // True when only `name` is set — the entry round-trips as a plain string.
+    bool isSimple() const { return !version.has_value() && !signer.has_value(); }
+
+    // Single-line human form used by `lgpm info` and error messages.
+    std::string toString() const {
+        std::string s = name;
+        if (version) s += " " + *version;
+        if (signer)  s += " [signer=" + *signer + "]";
+        return s;
+    }
+
+    bool operator==(const PackageDependency& o) const {
+        return name == o.name && version == o.version && signer == o.signer;
+    }
+    bool operator!=(const PackageDependency& o) const { return !(*this == o); }
+};
+
 // A scanned, installed package. Mirrors the manifest.json fields plus the
 // resolved install location. `icon` and `view` are optional; `view` is only
 // meaningful for ui_qml packages (the QML entry point).
@@ -65,7 +107,21 @@ struct InstalledPackage {
     std::string icon;
     std::string view;
     std::string manifestVersion;
+    // Dependency NAMES — one per manifest `dependencies[]` entry, in declared
+    // order, for BOTH the string and the object form. This is the edge set the
+    // dependency graph is built from, so an object-form entry must appear here
+    // exactly like a string one.
     std::vector<std::string> dependencies;
+    // The subset of those entries that declared a version range and/or a signer
+    // DID, carrying the constraint verbatim. Empty for a package whose
+    // dependencies are all bare names — which is every package in the workspace
+    // today, which is why the scan dropping object entries went unnoticed.
+    //
+    // Kept separate from `dependencies` (rather than widening its element type)
+    // so the name-only wire format and every existing consumer are unchanged;
+    // the semantic evaluation of these constraints belongs to the resolver in
+    // logos-package-downloader and, at load time, to the runtime.
+    std::vector<PackageDependency> dependencyConstraints;
     Hashes hashes;
     InstallType installType;
     std::string installDir;

@@ -17,6 +17,7 @@
 #include <nlohmann/json.hpp>
 
 void to_json(nlohmann::json& j, const Hashes& h);
+void to_json(nlohmann::json& j, const PackageDependency& d);
 void to_json(nlohmann::json& j, const InstalledPackage& p);
 void to_json(nlohmann::json& j, const DependencyTreeNode& n);
 void to_json(nlohmann::json& j, const DependentTreeNode& n);
