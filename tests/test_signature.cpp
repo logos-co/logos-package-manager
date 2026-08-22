@@ -664,3 +664,181 @@ TEST_F(SignatureTest, InstallVariantMismatchFailsAndLogs) {
     EXPECT_NE(logged.find("totally-bogus-platform"), std::string::npos) << logged;
     EXPECT_NE(logged.find(lgxPath.string()), std::string::npos) << logged;
 }
+
+// =============================================================================
+// The trust-anchor gate: what the three policy levels SAY, not just what they
+// decide.
+//
+// Install gating is the TRUST-ANCHOR POLICY: a package is authorised by an
+// ACTIVE anchor validating it, and the only anchor set is the local keyring,
+// which nothing enters except by an explicit user act. A signer DID in a
+// package, a catalog entry, or a downloaded key is a self-assertion and
+// establishes nothing. (The separate, weaker question "which same-named
+// candidate did the author mean" is dependency disambiguation, and it lives in
+// logos-package-downloader's resolver. The two are not the same check and
+// neither substitutes for the other.)
+//
+// The outcomes must therefore be a UNIFORM table, not three different noise
+// levels:
+//
+//   policy    unsigned            invalid sig   valid, unanchored   anchored
+//   NONE      install, silent     install       install             install
+//   WARN      install + warn      REFUSE        install + WARN      install
+//   REQUIRE   refuse              refuse        refuse, names DID    install
+//
+// The "valid, unanchored" cell at WARN is what these tests add. It used to be
+// TOTALLY SILENT — quieter than the unsigned case — so the worse posture
+// produced less noise than the better one.
+// =============================================================================
+
+TEST_F(SignatureTest, WarnPolicyDiagnosesASignerNoAnchorValidates) {
+    auto lgxPath = createUnsignedPackage("pkg_warn_unanchored");
+    ASSERT_FALSE(lgxPath.empty());
+
+    auto keyPath = generateKey("mallory");
+    ASSERT_FALSE(keyPath.empty());
+    ASSERT_TRUE(signPackage(lgxPath, keyPath, "Mallory Publishing"));
+    const std::string did = readDid("mallory");
+    ASSERT_FALSE(did.empty());
+
+    // Keyring is empty: no active anchor validates this signature.
+    auto pm = createPM(SignaturePolicy::WARN);
+    std::string errorMsg;
+    std::string result;
+    std::string logged;
+    {
+        CerrCapture cap;
+        result = pm.installPluginFile(lgxPath.string(), errorMsg);
+        logged = cap.str();
+    }
+
+    // WARN still installs — that is the policy's whole point...
+    EXPECT_FALSE(result.empty()) << "Install should succeed at WARN: " << errorMsg;
+    // ...but it must not do so in silence.
+    EXPECT_FALSE(logged.empty())
+        << "a package signed by a key no anchor validates installed with no diagnostic";
+    EXPECT_NE(logged.find("Warning"), std::string::npos) << logged;
+    // The DID is the only actionable thing in the message: it is what the user
+    // would add to their keyring if they decided to trust this publisher.
+    EXPECT_NE(logged.find(did), std::string::npos)
+        << "diagnostic does not name the signer DID; logged: " << logged;
+}
+
+TEST_F(SignatureTest, WarnPolicyIsQuietWhenAnAnchorDoesValidateTheSigner) {
+    // The control that makes the test above mean something: the warning is
+    // about the ANCHOR SET, not about being signed.
+    auto lgxPath = createUnsignedPackage("pkg_warn_anchored");
+    ASSERT_FALSE(lgxPath.empty());
+
+    auto keyPath = generateKey("anchored");
+    ASSERT_FALSE(keyPath.empty());
+    ASSERT_TRUE(signPackage(lgxPath, keyPath, "Anchored Publisher"));
+    const std::string did = readDid("anchored");
+    ASSERT_FALSE(did.empty());
+    ASSERT_TRUE(lgx_keyring_add(keyringDir.string().c_str(), "anchored-publisher",
+                                did.c_str(), nullptr, nullptr).success);
+
+    auto pm = createPM(SignaturePolicy::WARN);
+    std::string errorMsg;
+    std::string result;
+    std::string logged;
+    {
+        CerrCapture cap;
+        result = pm.installPluginFile(lgxPath.string(), errorMsg);
+        logged = cap.str();
+    }
+
+    EXPECT_FALSE(result.empty()) << errorMsg;
+    EXPECT_TRUE(logged.empty())
+        << "an anchored signer produced a diagnostic; logged: " << logged;
+}
+
+TEST_F(SignatureTest, WarnPolicyStillDiagnosesAnUnsignedPackage) {
+    // Regression guard on the neighbouring cell: adding the unanchored
+    // diagnostic must not disturb the unsigned one.
+    auto lgxPath = createUnsignedPackage("pkg_warn_still_unsigned");
+    ASSERT_FALSE(lgxPath.empty());
+
+    auto pm = createPM(SignaturePolicy::WARN);
+    std::string errorMsg;
+    std::string result;
+    std::string logged;
+    {
+        CerrCapture cap;
+        result = pm.installPluginFile(lgxPath.string(), errorMsg);
+        logged = cap.str();
+    }
+    EXPECT_FALSE(result.empty()) << errorMsg;
+    EXPECT_NE(logged.find("unsigned"), std::string::npos) << logged;
+}
+
+TEST_F(SignatureTest, NonePolicySaysNothingAboutTrustAtAll) {
+    // NONE governs TRUST only, and at NONE there is nothing to say about it.
+    auto lgxPath = createUnsignedPackage("pkg_none_quiet");
+    ASSERT_FALSE(lgxPath.empty());
+    auto keyPath = generateKey("nonekey2");
+    ASSERT_FALSE(keyPath.empty());
+    ASSERT_TRUE(signPackage(lgxPath, keyPath));
+
+    auto pm = createPM(SignaturePolicy::NONE);
+    std::string errorMsg;
+    std::string result;
+    std::string logged;
+    {
+        CerrCapture cap;
+        result = pm.installPluginFile(lgxPath.string(), errorMsg);
+        logged = cap.str();
+    }
+    EXPECT_FALSE(result.empty()) << errorMsg;
+    EXPECT_TRUE(logged.empty()) << logged;
+}
+
+TEST_F(SignatureTest, RequirePolicyStillRefusesAnUnanchoredSignerAndNamesTheDid) {
+    // The decision half of the same asymmetry: at REQUIRE the anchor set
+    // changes the DECISION; at WARN it changes only the DIAGNOSTIC. That is
+    // the correct asymmetry and it is deliberate.
+    auto lgxPath = createUnsignedPackage("pkg_req_unanchored");
+    ASSERT_FALSE(lgxPath.empty());
+    auto keyPath = generateKey("reqmallory");
+    ASSERT_FALSE(keyPath.empty());
+    ASSERT_TRUE(signPackage(lgxPath, keyPath));
+    const std::string did = readDid("reqmallory");
+    ASSERT_FALSE(did.empty());
+
+    auto pm = createPM(SignaturePolicy::REQUIRE);
+    std::string errorMsg;
+    std::string result = pm.installPluginFile(lgxPath.string(), errorMsg);
+    EXPECT_TRUE(result.empty()) << "REQUIRE installed a package no anchor validates";
+    EXPECT_NE(errorMsg.find(did), std::string::npos) << errorMsg;
+}
+
+// A catalog's or a package's own claim about its signer is NOT an anchor.
+// There is no API here that promotes one, and there must never be: the keyring
+// is the only anchor set, and it is populated only by an explicit user act.
+TEST_F(SignatureTest, PackageSelfAssertedSignerNameDoesNotBecomeAnAnchor) {
+    auto lgxPath = createUnsignedPackage("pkg_self_asserted");
+    ASSERT_FALSE(lgxPath.empty());
+    auto keyPath = generateKey("selfassert");
+    ASSERT_FALSE(keyPath.empty());
+    // The package claims a reassuring publisher name and URL. Both are
+    // attacker-controlled strings inside the package being judged.
+    ASSERT_TRUE(signPackage(lgxPath, keyPath, "Logos Core Team",
+                            "https://logos.co"));
+
+    PackageManagerLib pm;
+    pm.setKeyringDirectory(keyringDir.string());
+    auto verified = pm.verifyPackageSignature(lgxPath.string());
+    EXPECT_TRUE(verified.is_signed);
+    EXPECT_TRUE(verified.signature_valid);
+    EXPECT_EQ(verified.signer_name, "Logos Core Team");
+    // ...and it is still anchored to nothing.
+    EXPECT_TRUE(verified.trusted_as.empty())
+        << "a self-asserted signer name became a trust anchor: " << verified.trusted_as;
+
+    // REQUIRE must refuse it regardless of how the package describes itself.
+    pm.setUserModulesDirectory(modulesDir.string());
+    pm.setUserUiPluginsDirectory(uiPluginsDir.string());
+    pm.setSignaturePolicy(SignaturePolicy::REQUIRE);
+    std::string errorMsg;
+    EXPECT_TRUE(pm.installPluginFile(lgxPath.string(), errorMsg).empty()) << errorMsg;
+}

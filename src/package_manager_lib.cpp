@@ -242,7 +242,23 @@ std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, 
         }
     }
 
-    // Verify signature
+    // ── The trust-anchor gate: may this package be installed at all? ────────
+    //
+    // This is AUTHORIZATION, and the ACTIVE ANCHOR SET is the only thing that
+    // grants it. The anchor set is the local keyring alone (m_keyringDir,
+    // managed by `lgx keyring` and addTrustedKey/removeTrustedKey), and nothing
+    // enters it except by an explicit user act. A signer DID carried in the
+    // package, advertised by a catalog entry, listed in a repository's
+    // `trustedSigners`, or arriving with a downloaded key is a SELF-ASSERTION
+    // and establishes no anchor — see logos-package-downloader's
+    // Repository::trustedSignerDids, which is parsed and deliberately never
+    // consulted.
+    //
+    // Do not confuse this with a dependency's `signer` pin. That pin lives in
+    // the resolver (logos-package-downloader, PackageDownloaderLib::
+    // signerPinMatches) and only DISAMBIGUATES among same-named candidates;
+    // satisfying it authorises nothing, and it never reaches this function.
+    // Both checks are needed; neither substitutes for the other.
     if (m_signaturePolicy != SignaturePolicy::NONE) {
         auto sigResult = verifyPackageSignature(pluginPath);
 
@@ -263,8 +279,35 @@ std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, 
             errorMsg = "Package signed by untrusted key: " + sigResult.signer_did;
             return {};
         }
-        if (!sigResult.is_signed && m_signaturePolicy == SignaturePolicy::WARN) {
-            std::cerr << "Warning: Package is unsigned: " << pluginPath << "\n";
+        if (m_signaturePolicy == SignaturePolicy::WARN) {
+            // Every negative outcome that WARN nevertheless installs gets a
+            // line. This used to warn ONLY about the unsigned case, so a
+            // package carrying a valid signature from a key NO ACTIVE ANCHOR
+            // VALIDATES installed in total silence — quieter than an unsigned
+            // one, i.e. the worse posture produced less noise than the better.
+            // At WARN the anchor set changes the DIAGNOSTIC; at REQUIRE it
+            // changes the DECISION (above). That asymmetry is the point of
+            // having two levels, and it only works if both levels speak.
+            if (!sigResult.is_signed) {
+                std::cerr << "Warning: Package is unsigned: " << pluginPath << "\n";
+            } else if (sigResult.trusted_as.empty()) {
+                // Name the DID: it is the one actionable thing here — what the
+                // user would hand to `lgx keyring add` if they decided to
+                // trust this publisher. signer_name/signer_url are the
+                // package's own claims about itself and are reported as such,
+                // never as corroboration.
+                std::cerr << "Warning: Package is signed by a key no trusted anchor validates: "
+                          << pluginPath << "\n"
+                          << "  signer DID: "
+                          << (sigResult.signer_did.empty() ? "(none reported)" : sigResult.signer_did)
+                          << "\n";
+                if (!sigResult.signer_name.empty()) {
+                    std::cerr << "  signer claims to be: " << sigResult.signer_name
+                              << " (self-asserted, not verified)\n";
+                }
+                std::cerr << "  checked against keyring: "
+                          << (m_keyringDir.empty() ? "(default)" : m_keyringDir) << "\n";
+            }
         }
     }
 
