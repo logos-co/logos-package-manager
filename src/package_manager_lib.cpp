@@ -1044,21 +1044,76 @@ std::string PackageManagerLib::currentPlatformVariant()
 #endif
 }
 
+namespace {
+
+// The one place a variant-name SPELLING is enumerated.
+//
+// A variant name is "<os>-<architecture>", and both halves have more than one
+// live spelling in this ecosystem. Canonical vocabulary is the one
+// logos-module-builder's lib/resolvePlatforms.nix pins -- os in
+// {linux, darwin, windows}, architecture in {x86_64, aarch64} -- so the first
+// entry of every row below is the canonical spelling and the rest are legacy
+// ones that some producer actually writes:
+//
+//   nix-bundle-lgx/flake.nix:52                   darwin-amd64  linux-amd64
+//                                                 darwin-arm64  linux-arm64
+//   nix-bundle-logos-module-install/flake.nix:49  darwin-x86_64 linux-x86_64
+//                                                 darwin-arm64  linux-arm64
+//
+// Those two producers disagree with each other while the SECOND CONSUMES THE
+// FIRST -- it bundles a .lgx the first named and then calls this package
+// manager with --platform spelled its own way -- so this consumer is where the
+// disagreement has to be absorbed.
+//
+// Only the ARCHITECTURE is aliased. The OS half is matched verbatim on
+// purpose: aliasing it would weaken the fail-closed check that stops a Windows
+// package being installed as a macOS one, and "macos" (logos-release-set's
+// release-ASSET naming) is a different namespace that is translated to
+// "darwin" before it ever reaches an .lgx.
+//
+// Adding a spelling here is safe -- it only ever widens what an EXISTING
+// package resolves to, and rows are per-architecture so a new OS inherits
+// every alias without a new code path. Removing one is not: variant names sit
+// inside the signed hash tree (logos-package writes hashes["variants/<name>"]),
+// so a published package can never be renamed on disk. Alias on read.
+const std::vector<std::vector<std::string>>& architectureSpellings()
+{
+    static const std::vector<std::vector<std::string>> kSpellings = {
+        { "x86_64",  "amd64" },
+        { "aarch64", "arm64" },
+    };
+    return kSpellings;
+}
+
+} // namespace
+
 std::vector<std::string> PackageManagerLib::platformVariantsToTry()
 {
-    std::string primary = currentPlatformVariant();
+    const std::string primary = currentPlatformVariant();
     std::vector<std::string> variants;
+
+    // The host's own spelling always leads: it is what diagnostics print as
+    // "this machine", and what errorMsg names as the platform that was wanted.
     variants.push_back(primary);
 
-    if (primary == "linux-x86_64") {
-        variants.push_back("linux-amd64");
-    } else if (primary == "linux-amd64") {
-        variants.push_back("linux-x86_64");
-    } else if (primary == "linux-arm64") {
-        variants.push_back("linux-aarch64");
-    } else if (primary == "linux-aarch64") {
-        variants.push_back("linux-arm64");
+    // Split on the LAST '-' so the architecture is the trailing component
+    // whatever the OS half turns out to contain.
+    const std::string::size_type sep = primary.rfind('-');
+    if (sep != std::string::npos) {
+        const std::string os = primary.substr(0, sep);
+        const std::string arch = primary.substr(sep + 1);
+        for (const auto& row : architectureSpellings()) {
+            if (std::find(row.begin(), row.end(), arch) == row.end())
+                continue;
+            for (const auto& spelling : row) {
+                if (spelling != arch)
+                    variants.push_back(os + "-" + spelling);
+            }
+            break;
+        }
     }
+    // An architecture no row knows degrades to "this host's spelling only",
+    // which is the pre-alias behaviour and still fail-closed.
 
 #ifndef LGPM_PORTABLE_BUILD
     std::vector<std::string> devVariants;
