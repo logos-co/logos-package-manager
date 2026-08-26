@@ -952,13 +952,41 @@ std::optional<DependentTreeNode> PackageManagerLib::resolveDependents(const std:
 std::vector<DependencyTreeNode> DependencyTreeNode::flatten() const
 {
     std::vector<DependencyTreeNode> out;
-    std::unordered_set<std::string> seen;
+    std::unordered_map<std::string, std::size_t> indexByName;
     std::deque<const DependencyTreeNode*> queue;
     for (const auto& c : children) queue.push_back(&c);
     while (!queue.empty()) {
         const DependencyTreeNode* n = queue.front();
         queue.pop_front();
-        if (!seen.insert(n->name).second) continue;
+        auto [slot, inserted] = indexByName.emplace(n->name, out.size());
+        if (!inserted) {
+            // Already reported under this name. One row per package stays the
+            // contract — every flat consumer counts on it — so this does not
+            // append a second row. But a package satisfies its dependants only
+            // if it satisfies ALL of them, and the row we already have came
+            // from whichever edge BFS reached first, which means the SHALLOWEST
+            // one: a package named both directly by the root (bare, as every
+            // manifest in the fleet does today) and by a dependency that
+            // constrains it was reported "installed" and the rejection was
+            // dropped. That loss is invisible in the tree — resolveDependencies
+            // shows the mismatch, resolveFlatDependencies did not — and the
+            // flat list is the only projection basecamp's load gate reads.
+            //
+            // So a later edge that REJECTS what an earlier edge accepted
+            // promotes the row, carrying its constraint so the report can name
+            // the range that failed. Only Installed -> VersionMismatch: the
+            // other statuses are properties of the package rather than the
+            // edge (an absent package is absent on every edge) or structural
+            // (Cycle), and neither can be contradicted by a second edge.
+            DependencyTreeNode& recorded = out[slot->second];
+            if (recorded.status == DependencyStatus::Installed &&
+                n->status == DependencyStatus::VersionMismatch) {
+                recorded.status          = n->status;
+                recorded.requiredVersion = n->requiredVersion;
+                recorded.requiredSigner  = n->requiredSigner;
+            }
+            continue;
+        }
         DependencyTreeNode copy;
         copy.name            = n->name;
         copy.status          = n->status;
