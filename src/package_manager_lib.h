@@ -19,11 +19,24 @@ enum class InstallType {
     User,
 };
 
-// Whether a dependency is currently installed, absent, or part of a cycle.
+// Whether a dependency is currently installed, absent, part of a cycle, or
+// installed at a version its dependant refused.
+//
+// New enumerators are APPENDED, never inserted. This enum crosses a shared
+// library boundary — logos-package-manager-module compiles against this header
+// and links libpackage_manager_lib at run time — so the numeric value of an
+// existing enumerator is ABI.
 enum class DependencyStatus {
     Installed,
     NotInstalled,
     Cycle,
+    // The package IS installed, but its version does not satisfy the semver
+    // range the depending manifest declared for this edge. Distinct from
+    // NotInstalled on purpose: the two call for different remedies (install it
+    // vs. change a version), and only absence can be asserted without reading
+    // a constraint. `version` and `installType` are populated on such a node —
+    // the version actually present is the whole point of the report.
+    VersionMismatch,
 };
 
 struct SignatureVerificationResult {
@@ -134,14 +147,29 @@ struct InstalledPackage {
 struct DependencyTreeNode {
     std::string name;
     DependencyStatus status;
-    std::string version;                    // empty unless status == Installed
-    InstallType installType;                // meaningful only if status == Installed
+    // Empty for NotInstalled and Cycle; the version actually installed for
+    // both Installed and VersionMismatch.
+    std::string version;
+    InstallType installType;                // meaningful on the same two states
+    // The constraint the PARENT declared on this edge, verbatim, absent when
+    // the parent named the dependency without one (and always absent on the
+    // root, which no edge points at). `requiredVersion` is what `status` was
+    // judged against; `requiredSigner` is carried as data only — nothing in
+    // this library compares it, because who may sign a dependency is a trust
+    // decision that does not belong to the scanner.
+    std::optional<std::string> requiredVersion;
+    std::optional<std::string> requiredSigner;
     std::vector<DependencyTreeNode> children;
 
     // BFS enumeration of descendants (this node is excluded), deduplicated
     // by name so diamonds and cycles don't produce repeats. The `children`
     // vectors on returned copies are left empty — consumers iterate the
     // flat output without double-counting.
+    //
+    // Note the dedup interacts with the per-edge constraint fields: when two
+    // parents depend on the same package under different ranges, the flat list
+    // keeps whichever edge BFS reached first. Callers that must see every
+    // constraint on a package walk the tree instead of flattening it.
     std::vector<DependencyTreeNode> flatten() const;
 };
 
