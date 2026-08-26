@@ -498,15 +498,47 @@ std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, 
     // deleted, and what remains is this install's own finding. Absent file =
     // nothing was verified, which is a different fact from "unsigned" — and
     // nothing on disk claims to record that one.
+    //
+    // The read-only dance is the same trap clearReadOnlyRecursive exists for,
+    // and it bites here in BOTH directions. A payload file arrives with the
+    // package's own permissions and everything in the Nix store is 0444, so a
+    // package can ship its planted `signer` read-only. POSIX consults the
+    // parent directory to delete, so the remove below succeeds there and the
+    // fresh write lands; Windows refuses to delete a FILE_ATTRIBUTE_READONLY
+    // file AND refuses to reopen it for write, which would leave the planted
+    // value standing on exactly one platform. Clearing the bit first makes the
+    // two agree. Truncation is the last resort rather than a second delete:
+    // readInstalledSigner collapses an empty file to "nothing recorded", so
+    // emptying a file we cannot unlink still erases the CLAIM.
     {
         const fs::path signerFile = fs::path(installDir) / installedModuleName /
                                     PackageManagerLib::observedSignerFileName();
         std::error_code sigEc;
+        if (fs::exists(signerFile, sigEc)) {
+            sigEc.clear();
+            fs::permissions(signerFile, fs::perms::owner_write,
+                            fs::perm_options::add, sigEc);
+        }
+        sigEc.clear();
         fs::remove(signerFile, sigEc);
+
         if (observedSigner) {
-            std::ofstream sf(signerFile);
-            if (sf.is_open())
+            std::ofstream sf(signerFile, std::ios::out | std::ios::trunc);
+            if (sf.is_open()) {
                 sf << *observedSigner;
+            } else {
+                std::cerr << "Warning: could not record the observed signer for "
+                          << installedModuleName << "; it will read as unknown."
+                          << std::endl;
+            }
+        } else if (fs::exists(signerFile, sigEc)) {
+            std::ofstream sf(signerFile, std::ios::out | std::ios::trunc);
+            if (!sf.is_open()) {
+                std::cerr << "Warning: could not clear a stale observed-signer record for "
+                          << installedModuleName << " at " << signerFile.string()
+                          << "; it may name a publisher that did not sign this package."
+                          << std::endl;
+            }
         }
     }
 
