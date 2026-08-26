@@ -245,6 +245,14 @@ struct InstalledPackage {
     // this package declares about OTHERS. This is the one field that says
     // something about THIS package, and it is the only one a pin can be
     // checked against.
+    //
+    // Which is why the sidecar behind it is written AUTHORITATIVELY: install
+    // rewrites it on an observation and DELETES it when it has none, in the
+    // install directory, after the copy. Without both halves the value is not
+    // evidence at all — `variants/<v>/` is copied wholesale, so a package can
+    // ship a file by that name, and copyDirectoryContents merges rather than
+    // replaces, so a previous install's record would outlive the package it
+    // described. Either one lets a package wear an identity nobody verified.
     std::optional<std::string> observedSigner;
     Hashes hashes;
     InstallType installType;
@@ -523,6 +531,10 @@ public:
     //
     // Exposed so tests and tooling can assert on the file without hardcoding
     // the name in two places.
+    //
+    // The name is RESERVED: install overwrites or deletes it after the payload
+    // has been copied, so whatever a package ships under it is discarded. A
+    // package that could write here could name its own publisher.
     static const char* observedSignerFileName();
 
     // Read that sidecar out of an installed package directory.

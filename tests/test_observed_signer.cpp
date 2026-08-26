@@ -153,6 +153,51 @@ protected:
         return lgxPath;
     }
 
+    // A package whose VARIANT PAYLOAD carries an extra file of the author's
+    // choosing. `variants/<v>/` is copied wholesale into the install
+    // directory, so a package author picks the names that land there — which
+    // is the whole reason the sidecar namespace has to be defended.
+    fs::path createPackageWithPayloadFile(const std::string& name,
+                                          const std::string& fileName,
+                                          const std::string& content,
+                                          const std::string& version = "1.0.0") {
+        fs::path lgxPath = tempDir / (name + ".lgx");
+        fs::path contentDir = tempDir / (name + "_content");
+        fs::create_directories(contentDir);
+
+#if defined(__APPLE__)
+        const std::string libName = name + "_plugin.dylib";
+#elif defined(_WIN32)
+        const std::string libName = name + "_plugin.dll";
+#else
+        const std::string libName = name + "_plugin.so";
+#endif
+        { std::ofstream f(contentDir / libName); f << "fake library content"; }
+        { std::ofstream f(contentDir / fileName); f << content; }
+        {
+            std::ofstream mf(contentDir / "manifest.json");
+            mf << "{\n"
+               << "  \"name\": \"" << name << "\",\n"
+               << "  \"version\": \"" << version << "\",\n"
+               << "  \"type\": \"core\",\n"
+               << "  \"category\": \"test\"\n"
+               << "}";
+        }
+
+        lgx_result_t res = lgx_create(lgxPath.string().c_str(), name.c_str());
+        if (!res.success) return {};
+        lgx_package_t pkg = lgx_load(lgxPath.string().c_str());
+        if (!pkg) return {};
+        lgx_set_version(pkg, version.c_str());
+        res = lgx_add_variant(pkg, currentVariant().c_str(),
+                              contentDir.string().c_str(), libName.c_str());
+        if (!res.success) { lgx_free_package(pkg); return {}; }
+        res = lgx_save(pkg, lgxPath.string().c_str());
+        lgx_free_package(pkg);
+        if (!res.success) return {};
+        return lgxPath;
+    }
+
     PackageManagerLib createPM(SignaturePolicy policy = SignaturePolicy::WARN) {
         PackageManagerLib pm;
         pm.setUserModulesDirectory(modulesDir.string());
@@ -423,6 +468,127 @@ TEST_F(ObservedSignerTest, SidecarSitsBesideTheVariantFile) {
     EXPECT_TRUE(fs::exists(dir / "variant"));
     EXPECT_TRUE(fs::exists(dir / PackageManagerLib::observedSignerFileName()));
     EXPECT_TRUE(fs::exists(dir / "manifest.json"));
+}
+
+
+// =============================================================================
+// 1b. RECORDING — the sidecar is an OBSERVATION, so only install may write it
+//
+// Both tests below are about one property: what the `signer` file says is
+// what THIS install verified, and nothing else can put a value there. A
+// recording that anybody but the verifier can write is not evidence, and a
+// pin compared against it is theatre.
+// =============================================================================
+
+// ATTACK 1 — the package plants the record itself.
+//
+// `variants/<v>/` is copied wholesale into the install directory, so a package
+// author chooses filenames that land there. An UNSIGNED package that simply
+// ships a file called `signer` containing somebody else's DID would otherwise
+// be reported as published by that somebody. No key, no signature, no keyring:
+// the pin is satisfied by naming the answer.
+TEST_F(ObservedSignerTest, APackageCannotPlantItsOwnSignerRecord) {
+    auto victimKey = generateKey("victimkey");
+    ASSERT_FALSE(victimKey.empty());
+    const std::string victimDid = readDid("victimkey");
+    ASSERT_FALSE(victimDid.empty());
+
+    // Nothing signs this package. It just carries the name it wants to wear.
+    auto lgxPath = createPackageWithPayloadFile(
+        "obs_planted", PackageManagerLib::observedSignerFileName(), victimDid);
+    ASSERT_FALSE(lgxPath.empty());
+
+    auto pm = createPM(SignaturePolicy::WARN);
+    std::string errorMsg;
+    ASSERT_FALSE(pm.installPluginFile(lgxPath.string(), errorMsg).empty()) << errorMsg;
+
+    // Nothing was verified, so nothing is recorded — the planted file must not
+    // survive as an identity.
+    EXPECT_FALSE(PackageManagerLib::readInstalledSigner(
+                     installedDirOf("obs_planted").string()).has_value())
+        << "a package planted its own observed-signer record";
+
+    auto pkgs = pm.getInstalledPackages();
+    ASSERT_EQ(pkgs.size(), 1u);
+    EXPECT_FALSE(pkgs[0].observedSigner.has_value());
+
+    // ...and the pin it was aimed at must not be satisfied by it.
+    writeInstalled("obs_planted_dependant", {objDep("obs_planted", "", victimDid)});
+    auto tree = pm.resolveDependencies("obs_planted_dependant");
+    ASSERT_TRUE(tree.has_value());
+    const auto* child = childNamed(*tree, "obs_planted");
+    ASSERT_NE(child, nullptr);
+    EXPECT_EQ(child->status, DependencyStatus::SignerUnknown);
+}
+
+// ATTACK 2 — the record outlives the package it described.
+//
+// copyDirectoryContents MERGES into an existing install directory; it does not
+// clear it. So a second install that verifies nothing leaves the FIRST
+// install's `signer` file in place, and an impostor inherits the identity of
+// whoever published the package it replaced. The record has to describe the
+// bytes that are there now, which means an install with no observation must
+// ERASE any earlier one rather than leave it standing.
+TEST_F(ObservedSignerTest, AnInstallThatVerifiesNothingErasesTheEarlierRecord) {
+    auto lgxPath = createPackage("obs_replaced");
+    ASSERT_FALSE(lgxPath.empty());
+    auto keyPath = generateKey("replacedkey");
+    ASSERT_FALSE(keyPath.empty());
+    ASSERT_TRUE(signPackage(lgxPath, keyPath));
+    anchor("replacedkey", "publisher");
+    const std::string did = readDid("replacedkey");
+
+    auto pm = createPM(SignaturePolicy::REQUIRE);
+    std::string errorMsg;
+    ASSERT_FALSE(pm.installPluginFile(lgxPath.string(), errorMsg).empty()) << errorMsg;
+    ASSERT_EQ(PackageManagerLib::readInstalledSigner(installedDirOf("obs_replaced").string()),
+              std::optional<std::string>(did));
+
+    // A different, UNSIGNED package by the same name lands on top of it.
+    auto impostor = createPackageWithPayloadFile("obs_replaced", "impostor.txt", "x");
+    ASSERT_FALSE(impostor.empty());
+    auto pmWarn = createPM(SignaturePolicy::WARN);
+    ASSERT_FALSE(pmWarn.installPluginFile(impostor.string(), errorMsg).empty()) << errorMsg;
+
+    EXPECT_FALSE(PackageManagerLib::readInstalledSigner(
+                     installedDirOf("obs_replaced").string()).has_value())
+        << "an unsigned reinstall inherited the previous publisher's identity";
+
+    writeInstalled("obs_replaced_dependant", {objDep("obs_replaced", "", did)});
+    auto tree = pmWarn.resolveDependencies("obs_replaced_dependant");
+    ASSERT_TRUE(tree.has_value());
+    const auto* child = childNamed(*tree, "obs_replaced");
+    ASSERT_NE(child, nullptr);
+    EXPECT_EQ(child->status, DependencyStatus::SignerUnknown);
+}
+
+// The control for both: a reinstall that DOES verify replaces the record
+// rather than erasing it, so the fix cannot be "always delete the sidecar".
+TEST_F(ObservedSignerTest, AVerifiedReinstallReplacesTheRecordWithTheNewPublisher) {
+    auto first = createPackage("obs_rotated");
+    ASSERT_FALSE(first.empty());
+    auto keyOne = generateKey("rotone");
+    ASSERT_TRUE(signPackage(first, keyOne));
+    anchor("rotone", "pub_one");
+
+    auto pm = createPM(SignaturePolicy::REQUIRE);
+    std::string errorMsg;
+    ASSERT_FALSE(pm.installPluginFile(first.string(), errorMsg).empty()) << errorMsg;
+    ASSERT_EQ(PackageManagerLib::readInstalledSigner(installedDirOf("obs_rotated").string()),
+              std::optional<std::string>(readDid("rotone")));
+
+    // Same name, republished by a second anchored publisher.
+    fs::remove(tempDir / "obs_rotated.lgx");
+    fs::remove_all(tempDir / "obs_rotated_content");
+    auto second = createPackage("obs_rotated", "1.1.0");
+    ASSERT_FALSE(second.empty());
+    auto keyTwo = generateKey("rottwo");
+    ASSERT_TRUE(signPackage(second, keyTwo));
+    anchor("rottwo", "pub_two");
+    ASSERT_FALSE(pm.installPluginFile(second.string(), errorMsg).empty()) << errorMsg;
+
+    EXPECT_EQ(PackageManagerLib::readInstalledSigner(installedDirOf("obs_rotated").string()),
+              std::optional<std::string>(readDid("rottwo")));
 }
 
 // =============================================================================
