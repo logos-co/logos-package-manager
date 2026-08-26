@@ -815,6 +815,96 @@ TEST_F(DependencyResolutionTest, VersionMismatchSurvivesFlatten) {
     EXPECT_EQ(*it->requiredVersion, ">=3.0.0");
 }
 
+TEST_F(DependencyResolutionTest, DeeperMismatchIsNotMaskedByAShallowerBareEdge) {
+    // The DIAMOND, which the chain tests above cannot reach: "lib" is named
+    // twice — once by the root with no range, once by "helper" with one it
+    // does not satisfy. Both facts are true; only one of them survives the
+    // flat list, and flatten() dedupes by name with FIRST-WINS, while BFS
+    // guarantees the depth-1 edge is always reached first. So the
+    // unconstrained edge wins and the mismatch never reaches the flat list —
+    // which is the ONLY projection resolveFlatDependencies and basecamp's
+    // load gate ever read. The tree keeps it; the wire does not.
+    //
+    // Every package in the fleet declares bare names today, so "the root also
+    // depends on it directly, without a range" is the ordinary shape, not an
+    // exotic one.
+    writeManifest(modulesDir, "app", "core", {"lib", "helper"});
+    writeManifestRawDeps(modulesDir, "helper",
+                         json::array({ json{{"name", "lib"}, {"version", "^2.0.0"}} }));
+    writeManifest(modulesDir, "lib", "core", {}, "1.0.0");
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(modulesDir.string());
+
+    auto tree = pm.resolveDependencies("app");
+    ASSERT_TRUE(tree);
+
+    // The resolver itself is right — the mismatch IS on the tree.
+    ASSERT_EQ(tree->children.size(), 2u);
+    const auto& helper = tree->children[1];
+    ASSERT_EQ(helper.name, "helper");
+    ASSERT_EQ(helper.children.size(), 1u);
+    ASSERT_EQ(helper.children[0].status, DependencyStatus::VersionMismatch);
+
+    // ...and the flat projection must not lose it. One row per package still,
+    // but the row has to report the constraint that is NOT satisfied: a
+    // package satisfies its dependants only if it satisfies ALL of them.
+    auto flat = tree->flatten();
+    EXPECT_EQ(flat.size(), 2u);
+    auto it = std::find_if(flat.begin(), flat.end(),
+                           [](const DependencyTreeNode& n) { return n.name == "lib"; });
+    ASSERT_NE(it, flat.end());
+    EXPECT_EQ(it->status, DependencyStatus::VersionMismatch);
+    ASSERT_TRUE(it->requiredVersion.has_value());
+    EXPECT_EQ(*it->requiredVersion, "^2.0.0");
+    // The installed version stays on the row: "requires ^2.0.0, found 1.0.0".
+    EXPECT_EQ(it->version, "1.0.0");
+}
+
+TEST_F(DependencyResolutionTest, DeeperMismatchSurvivesRegardlessOfDeclarationOrder) {
+    // Same graph, the root's two entries swapped. BFS visits by DEPTH, so the
+    // depth-1 "lib" is reached first either way — declaration order must not
+    // decide whether a user is told about a broken dependency.
+    writeManifest(modulesDir, "app", "core", {"helper", "lib"});
+    writeManifestRawDeps(modulesDir, "helper",
+                         json::array({ json{{"name", "lib"}, {"version", "^2.0.0"}} }));
+    writeManifest(modulesDir, "lib", "core", {}, "1.0.0");
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(modulesDir.string());
+
+    auto tree = pm.resolveDependencies("app");
+    ASSERT_TRUE(tree);
+    auto flat = tree->flatten();
+    auto it = std::find_if(flat.begin(), flat.end(),
+                           [](const DependencyTreeNode& n) { return n.name == "lib"; });
+    ASSERT_NE(it, flat.end());
+    EXPECT_EQ(it->status, DependencyStatus::VersionMismatch);
+}
+
+TEST_F(DependencyResolutionTest, ASatisfiedDiamondStaysInstalledAndDeduped) {
+    // The control that keeps the fix from degenerating into "any duplicate is
+    // a mismatch". Two edges, both satisfied: one row, still installed, and
+    // the first edge's constraint is the one reported.
+    writeManifest(modulesDir, "app", "core", {"lib", "helper"});
+    writeManifestRawDeps(modulesDir, "helper",
+                         json::array({ json{{"name", "lib"}, {"version", "^1.0.0"}} }));
+    writeManifest(modulesDir, "lib", "core", {}, "1.0.0");
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(modulesDir.string());
+
+    auto tree = pm.resolveDependencies("app");
+    ASSERT_TRUE(tree);
+    auto flat = tree->flatten();
+    EXPECT_EQ(flat.size(), 2u);
+    auto it = std::find_if(flat.begin(), flat.end(),
+                           [](const DependencyTreeNode& n) { return n.name == "lib"; });
+    ASSERT_NE(it, flat.end());
+    EXPECT_EQ(it->status, DependencyStatus::Installed);
+    EXPECT_FALSE(it->requiredVersion.has_value());   // the depth-1 bare edge
+}
+
 TEST_F(DependencyResolutionTest, RootCarriesNoConstraint) {
     // Nothing points AT the root, so it has no edge and no range — and it must
     // never be judged against one.
