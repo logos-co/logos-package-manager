@@ -562,6 +562,45 @@ TEST_F(ObservedSignerTest, AnInstallThatVerifiesNothingErasesTheEarlierRecord) {
     EXPECT_EQ(child->status, DependencyStatus::SignerUnknown);
 }
 
+// The same plant, shipped READ-ONLY.
+//
+// Stated plainly about what this test can and cannot catch: on POSIX it passes
+// with or without the permission handling, because deleting a file consults
+// the PARENT DIRECTORY's write bit and not the file's. It discriminates on
+// Windows, which refuses both to delete a FILE_ATTRIBUTE_READONLY file and to
+// reopen it for write — so without clearing the bit the planted value survives
+// there and nowhere else. That is the exact shape of the read-only payload bug
+// clearReadOnlyRecursive was already written for (every .lgx with an icon
+// carries a 0444 file, because nix-bundle-lgx copies it out of the Nix store),
+// which is why the guard is here rather than waiting for a Windows report.
+TEST_F(ObservedSignerTest, AReadOnlyPlantedSignerRecordIsStillDiscarded) {
+    auto victimKey = generateKey("rovictim");
+    ASSERT_FALSE(victimKey.empty());
+    const std::string victimDid = readDid("rovictim");
+
+    auto lgxPath = createPackageWithPayloadFile(
+        "obs_ro_planted", PackageManagerLib::observedSignerFileName(), victimDid);
+    ASSERT_FALSE(lgxPath.empty());
+
+    auto pm = createPM(SignaturePolicy::WARN);
+    std::string errorMsg;
+    ASSERT_FALSE(pm.installPluginFile(lgxPath.string(), errorMsg).empty()) << errorMsg;
+
+    const fs::path landed =
+        installedDirOf("obs_ro_planted") / PackageManagerLib::observedSignerFileName();
+    std::error_code ec;
+    fs::permissions(landed, fs::perms::owner_read | fs::perms::group_read |
+                            fs::perms::others_read,
+                    fs::perm_options::replace, ec);
+
+    // Reinstall over it. Nothing verifies, so the record must end up saying
+    // nothing — deleted where that is possible, emptied where it is not.
+    ASSERT_FALSE(pm.installPluginFile(lgxPath.string(), errorMsg).empty()) << errorMsg;
+    EXPECT_FALSE(PackageManagerLib::readInstalledSigner(
+                     installedDirOf("obs_ro_planted").string()).has_value())
+        << "a read-only planted record survived a reinstall";
+}
+
 // The control for both: a reinstall that DOES verify replaces the record
 // rather than erasing it, so the fix cannot be "always delete the sidecar".
 TEST_F(ObservedSignerTest, AVerifiedReinstallReplacesTheRecordWithTheNewPublisher) {
