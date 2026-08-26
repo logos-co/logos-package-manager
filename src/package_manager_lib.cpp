@@ -98,9 +98,10 @@ const char* installTypeToString(InstallType t) {
 
 const char* dependencyStatusToString(DependencyStatus s) {
     switch (s) {
-        case DependencyStatus::Installed:    return "installed";
-        case DependencyStatus::NotInstalled: return "not_installed";
-        case DependencyStatus::Cycle:        return "cycle";
+        case DependencyStatus::Installed:       return "installed";
+        case DependencyStatus::NotInstalled:    return "not_installed";
+        case DependencyStatus::Cycle:           return "cycle";
+        case DependencyStatus::VersionMismatch: return "version_mismatch";
     }
     return "";
 }
@@ -817,37 +818,62 @@ std::optional<DependencyTreeNode> PackageManagerLib::resolveDependencies(const s
     // Recursive walk. Visited-on-path set for cycle detection; the tree is
     // expanded across different branches (diamond shapes) but a cycle
     // through a single branch produces a Cycle leaf to stop descent.
+    //
+    // Takes the whole PackageDependency rather than the name alone: the range
+    // and the signer live on the EDGE, not on the package, so they have to
+    // travel with the recursion to be evaluated at the node they constrain.
+    // Passing only `dep.name` here is what made the constraint unreachable.
     std::set<std::string> path;
-    std::function<DependencyTreeNode(const std::string&)> build = [&](const std::string& name) -> DependencyTreeNode {
+    std::function<DependencyTreeNode(const PackageDependency&)> build =
+        [&](const PackageDependency& dep) -> DependencyTreeNode {
         DependencyTreeNode node;
-        node.name = name;
+        node.name = dep.name;
+        // Recorded before any early return, so a constraint is visible even on
+        // an edge whose status is decided without consulting it.
+        node.requiredVersion = dep.version;
+        node.requiredSigner  = dep.signer;
 
-        if (path.count(name)) {
+        if (path.count(dep.name)) {
             node.status = DependencyStatus::Cycle;
             return node;
         }
 
-        auto it = byName.find(name);
+        auto it = byName.find(dep.name);
         if (it == byName.end()) {
+            // ABSENCE OUTRANKS MISMATCH, deliberately. A range can only be
+            // judged against a version we actually have, and "install it" is
+            // the action either way — reporting version_mismatch for a package
+            // that is not there would name the weaker fact and point the user
+            // at the wrong fix. The declared range still rides along on
+            // `requiredVersion` so a caller can say which version to install.
             node.status = DependencyStatus::NotInstalled;
             return node;
         }
 
         const auto& scan = it->second;
-        node.status      = DependencyStatus::Installed;
         node.version     = scan.version;
         node.installType = scan.installType;
+        // An absent range means the parent declared no constraint and anything
+        // installed satisfies it. A range that does not PARSE is treated as
+        // unsatisfied rather than ignored: silently dropping a typo'd range
+        // would fail open, and `lgx verify` already rejects the syntax upstream
+        // (logos::semver::valid_range), so reaching here with one means the
+        // manifest bypassed that gate and deserves to be visible.
+        node.status = (!dep.version || logos::semver::satisfies(scan.version, *dep.version))
+                          ? DependencyStatus::Installed
+                          : DependencyStatus::VersionMismatch;
 
-        path.insert(name);
+        path.insert(dep.name);
         node.children.reserve(scan.dependencies.size());
-        for (const auto& dep : scan.dependencies) {
-            node.children.push_back(build(dep.name));
+        for (const auto& child : scan.dependencies) {
+            node.children.push_back(build(child));
         }
-        path.erase(name);
+        path.erase(dep.name);
         return node;
     };
 
-    return build(packageName);
+    // The root is not pointed at by any edge, so it carries no constraint.
+    return build(PackageDependency(packageName));
 }
 
 std::optional<DependentTreeNode> PackageManagerLib::resolveDependents(const std::string& packageName)
@@ -934,10 +960,12 @@ std::vector<DependencyTreeNode> DependencyTreeNode::flatten() const
         queue.pop_front();
         if (!seen.insert(n->name).second) continue;
         DependencyTreeNode copy;
-        copy.name        = n->name;
-        copy.status      = n->status;
-        copy.version     = n->version;
-        copy.installType = n->installType;
+        copy.name            = n->name;
+        copy.status          = n->status;
+        copy.version         = n->version;
+        copy.installType     = n->installType;
+        copy.requiredVersion = n->requiredVersion;
+        copy.requiredSigner  = n->requiredSigner;
         out.push_back(std::move(copy));
         for (const auto& c : n->children) queue.push_back(&c);
     }

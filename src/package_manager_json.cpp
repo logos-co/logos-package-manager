@@ -55,14 +55,21 @@ void to_json(nlohmann::json& j, const DependencyTreeNode& n)
     j["status"]   = dependencyStatusToString(n.status);
     // For Cycle and NotInstalled nodes, installType has no meaningful value;
     // emit the empty string to match the legacy wire format produced when
-    // the lib returned JSON directly.
-    if (n.status == DependencyStatus::Installed) {
+    // the lib returned JSON directly. VersionMismatch resolved to a real
+    // installed package, so it carries both — the version actually present is
+    // the half of the report `requiredVersion` is compared against.
+    if (n.status == DependencyStatus::Installed || n.status == DependencyStatus::VersionMismatch) {
         j["version"]     = n.version;
         j["installType"] = installTypeToString(n.installType);
     } else {
         j["version"]     = "";
         j["installType"] = "";
     }
+    // Additive, and absent unless the parent edge declared one — so a tree of
+    // bare-name dependencies, which is every package in the workspace today,
+    // serialises byte-identically to before.
+    if (n.requiredVersion) j["requiredVersion"] = *n.requiredVersion;
+    if (n.requiredSigner)  j["requiredSigner"]  = *n.requiredSigner;
     j["children"] = n.children;
 }
 
