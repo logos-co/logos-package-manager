@@ -318,7 +318,7 @@ std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, 
     // the only place it can be: the .lgx is deleted after extraction and never
     // retained, so this verification is the one and only moment in a package's
     // life at which anybody knows who signed it. What survives is the sidecar
-    // written below.
+    // written once the copy has landed.
     std::optional<std::string> observedSigner;
     if (m_signaturePolicy != SignaturePolicy::NONE) {
         auto sigResult = verifyPackageSignature(pluginPath);
@@ -414,30 +414,6 @@ std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, 
         }
     }
 
-    // ── Persist the observed publisher, next to `variant` ──────────────────
-    //
-    // Exactly the mechanism extractLgxPackage already uses for `variant`: a
-    // single-line, non-payload sidecar dropped into the extracted variant
-    // directory, which copyLibraryFromExtracted then copies wholesale into
-    // <installRoot>/<name>/. Read back at scan time by readInstalledSigner,
-    // the mirror of readInstalledVariant.
-    //
-    // Written HERE rather than inside extractLgxPackage because only
-    // installPluginFile ever verifies a signature — extractLgxPackage is a
-    // public entry point of its own that unpacks without any keyring, and
-    // giving it a signer parameter it could not fill would invite a caller to
-    // pass a claimed DID.
-    //
-    // `observedSigner` is empty unless a signature VERIFIED, so an unsigned
-    // package, a package whose signature failed (which cannot get this far
-    // anyway), and any install under SignaturePolicy::NONE all leave no file
-    // at all. Absent file = unknown, and that is a different fact from
-    // "unsigned", which nothing on disk claims to record.
-    if (observedSigner && !variantDir.empty()) {
-        std::ofstream sf(fs::path(variantDir) / PackageManagerLib::observedSignerFileName());
-        if (sf.is_open())
-            sf << *observedSigner;
-    }
 
     // Determine module type from manifest.json "type" field
     std::string detectedType;
@@ -486,6 +462,52 @@ std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, 
     if (!copyLibraryFromExtracted(tempDir, installDir, isCoreModule, installedModuleName, errorMsg)) {
         removeTreeQuietly(tempDir);
         return {};
+    }
+
+    // ── Record who published what is now on disk ───────────────────────────
+    //
+    // The mechanism is the one extractLgxPackage already uses for `variant`: a
+    // single-line, non-payload sidecar in <installRoot>/<name>/, read back at
+    // scan time by readInstalledSigner, the mirror of readInstalledVariant.
+    // Written HERE rather than inside extractLgxPackage because only
+    // installPluginFile ever verifies a signature — extractLgxPackage unpacks
+    // without any keyring, and giving it a signer parameter it could not fill
+    // would invite a caller to pass a CLAIMED did.
+    //
+    // TOTAL, and AFTER the copy, and both of those are load-bearing.
+    //
+    // A sidecar that says who published a package is EVIDENCE, and evidence
+    // only means anything if the verifier is the only thing that can write it
+    // and it always describes the bytes sitting there now. Two ways that fails
+    // if this is a bare "write it when we have one" in the extracted tree:
+    //
+    //   1. THE PACKAGE PLANTS IT. `variants/<v>/` is copied wholesale into the
+    //      install directory, so a package author picks filenames that land
+    //      there. An unsigned package shipping a file called `signer` holding
+    //      somebody else's DID would be reported as published by them — no
+    //      key, no signature, no keyring, pin satisfied by naming the answer.
+    //   2. THE PREVIOUS INSTALL'S RECORD OUTLIVES IT. copyDirectoryContents
+    //      MERGES into an existing directory rather than replacing it, so a
+    //      second install that verifies nothing leaves the FIRST install's
+    //      sidecar standing and an impostor inherits the identity of whatever
+    //      it replaced.
+    //
+    // Writing on an observation and REMOVING when there is none, in the
+    // install directory once the copy has landed, closes both: whatever the
+    // package shipped and whatever the last install left are overwritten or
+    // deleted, and what remains is this install's own finding. Absent file =
+    // nothing was verified, which is a different fact from "unsigned" — and
+    // nothing on disk claims to record that one.
+    {
+        const fs::path signerFile = fs::path(installDir) / installedModuleName /
+                                    PackageManagerLib::observedSignerFileName();
+        std::error_code sigEc;
+        fs::remove(signerFile, sigEc);
+        if (observedSigner) {
+            std::ofstream sf(signerFile);
+            if (sf.is_open())
+                sf << *observedSigner;
+        }
     }
 
     // Determine the path we report for what was just installed. This is the
