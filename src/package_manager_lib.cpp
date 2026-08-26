@@ -102,8 +102,59 @@ const char* dependencyStatusToString(DependencyStatus s) {
         case DependencyStatus::NotInstalled:    return "not_installed";
         case DependencyStatus::Cycle:           return "cycle";
         case DependencyStatus::VersionMismatch: return "version_mismatch";
+        case DependencyStatus::SignerMismatch:  return "signer_mismatch";
+        case DependencyStatus::SignerUnknown:   return "signer_unknown";
     }
     return "";
+}
+
+namespace {
+
+// How harshly an EDGE judged the package it points at. Higher wins, and the
+// ranking is the single authority on two questions that must agree: which
+// constraint a node reports when one edge fails more than one of them
+// (resolveDependencies), and which edge's verdict survives the flat list's
+// name dedup (DependencyTreeNode::flatten).
+//
+//   Installed(0)       no constraint failed
+//   SignerUnknown(1)   a pin could not be checked — missing evidence
+//   VersionMismatch(2) a range definitely failed
+//   SignerMismatch(3)  identity definitely failed: not this package at all
+//
+// Missing evidence ranks BELOW a definite failure, so "we could not tell who
+// published this" never masks a range rejection the user can actually act on.
+// Identity ranks above a range because a range means nothing until you know
+// which package you are ranging over — "requires ^2.0.0, found 1.0.0" sends
+// somebody hunting for a newer build of a package that is not theirs at any
+// version.
+//
+// NotInstalled and Cycle score -1: they are properties of the package or of
+// the graph rather than verdicts an edge reached, so they neither promote nor
+// are promoted. Absence outranks everything, and it is enforced by returning
+// early before any of this runs.
+int edgeVerdictSeverity(DependencyStatus s)
+{
+    switch (s) {
+        case DependencyStatus::Installed:       return 0;
+        case DependencyStatus::SignerUnknown:   return 1;
+        case DependencyStatus::VersionMismatch: return 2;
+        case DependencyStatus::SignerMismatch:  return 3;
+        case DependencyStatus::NotInstalled:
+        case DependencyStatus::Cycle:           return -1;
+    }
+    return -1;
+}
+
+} // namespace
+
+bool nodeResolvedToAnInstalledPackage(DependencyStatus s) {
+    // Named by exclusion here on purpose, and it is the one place that is
+    // right: the question is "is anything on disk", and exactly two statuses
+    // mean there is not. A new edge-decided status is by definition about a
+    // package that IS installed, so it should be admitted by default — the
+    // opposite of the classify-by-naming rule that applies when the question
+    // is "does this block".
+    return s != DependencyStatus::NotInstalled && s != DependencyStatus::Cycle;
 }
 
 bool PackageManagerLib::versionGreaterOrEqual(const std::string& a, const std::string& b)
@@ -255,13 +306,25 @@ std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, 
     // Repository::trustedSignerDids, which is parsed and deliberately never
     // consulted.
     //
-    // Do not confuse this with a dependency's `signer` pin. That pin lives in
-    // the resolver (logos-package-downloader, PackageDownloaderLib::
-    // signerPinMatches) and only DISAMBIGUATES among same-named candidates;
-    // satisfying it authorises nothing, and it never reaches this function.
+    // Do not confuse this with a dependency's `signer` pin. That pin
+    // DISAMBIGUATES among same-named candidates — is this the same package? —
+    // and satisfying it authorises nothing. It is checked by the catalog
+    // resolver (logos-package-downloader, PackageDownloaderLib::
+    // signerPinMatches) when choosing what to fetch, and against the installed
+    // set by resolveDependencies in this file. It never reaches this function.
     // Both checks are needed; neither substitutes for the other.
+    //
+    // This block is also where the OBSERVED signer is established, which is
+    // the only place it can be: the .lgx is deleted after extraction and never
+    // retained, so this verification is the one and only moment in a package's
+    // life at which anybody knows who signed it. What survives is the sidecar
+    // written below.
+    std::optional<std::string> observedSigner;
     if (m_signaturePolicy != SignaturePolicy::NONE) {
         auto sigResult = verifyPackageSignature(pluginPath);
+        // WHAT COUNTS AS AN OBSERVATION — the rule lives in
+        // observedSignerFrom(), not inline here. See that function.
+        observedSigner = observedSignerFrom(sigResult);
 
         if (sigResult.is_signed && !sigResult.signature_valid) {
             errorMsg = "Invalid signature: " + (sigResult.error.empty() ? "unknown error" : sigResult.error);
@@ -349,6 +412,31 @@ std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, 
             variantDir = candidate.string();
             break;
         }
+    }
+
+    // ── Persist the observed publisher, next to `variant` ──────────────────
+    //
+    // Exactly the mechanism extractLgxPackage already uses for `variant`: a
+    // single-line, non-payload sidecar dropped into the extracted variant
+    // directory, which copyLibraryFromExtracted then copies wholesale into
+    // <installRoot>/<name>/. Read back at scan time by readInstalledSigner,
+    // the mirror of readInstalledVariant.
+    //
+    // Written HERE rather than inside extractLgxPackage because only
+    // installPluginFile ever verifies a signature — extractLgxPackage is a
+    // public entry point of its own that unpacks without any keyring, and
+    // giving it a signer parameter it could not fill would invite a caller to
+    // pass a claimed DID.
+    //
+    // `observedSigner` is empty unless a signature VERIFIED, so an unsigned
+    // package, a package whose signature failed (which cannot get this far
+    // anyway), and any install under SignaturePolicy::NONE all leave no file
+    // at all. Absent file = unknown, and that is a different fact from
+    // "unsigned", which nothing on disk claims to record.
+    if (observedSigner && !variantDir.empty()) {
+        std::ofstream sf(fs::path(variantDir) / PackageManagerLib::observedSignerFileName());
+        if (sf.is_open())
+            sf << *observedSigner;
     }
 
     // Determine module type from manifest.json "type" field
@@ -503,6 +591,9 @@ struct ScanEntry {
     // PackageDependency). The graph walks `.name`; the constraints ride along
     // for consumers that evaluate them.
     std::vector<PackageDependency> dependencies;
+    // The publisher DID recorded by install for THIS package — see
+    // InstalledPackage::observedSigner. nullopt = nothing recorded = unknown.
+    std::optional<std::string> observedSigner;
     json manifest;  // full manifest.json — used to emit the JSON passthrough
 };
 
@@ -536,24 +627,33 @@ static std::string resolveMainFilePath(const json& manifest,
     return {};
 }
 
+// Read one line out of a sidecar file inside an installed package directory,
+// trimmed. Shared by the `variant` and `signer` sidecars, which are the same
+// shape: one line, no payload meaning, written by install, read by scan.
+// Returns empty when the file is absent or holds nothing.
+static std::string readSidecarLine(const fs::path& moduleDir, const char* fileName)
+{
+    std::ifstream f(moduleDir / fileName);
+    if (!f.is_open())
+        return {};
+    std::string line;
+    std::getline(f, line);
+    // Trim trailing whitespace / CR so the comparison is exact.
+    while (!line.empty() &&
+           (line.back() == '\r' || line.back() == '\n' ||
+            line.back() == ' '  || line.back() == '\t')) {
+        line.pop_back();
+    }
+    return line;
+}
+
 // Reads the single-line `variant` file that installPluginFile writes into
 // every installed module directory, recording which variant was physically
 // extracted there. Returns empty if the file is absent (e.g. embedded or
 // legacy installs) — callers must treat that as "unknown", not a mismatch.
 static std::string readInstalledVariant(const fs::path& moduleDir)
 {
-    std::ifstream vf(moduleDir / "variant");
-    if (!vf.is_open())
-        return {};
-    std::string variant;
-    std::getline(vf, variant);
-    // Trim trailing whitespace / CR so the comparison is exact.
-    while (!variant.empty() &&
-           (variant.back() == '\r' || variant.back() == '\n' ||
-            variant.back() == ' '  || variant.back() == '\t')) {
-        variant.pop_back();
-    }
-    return variant;
+    return readSidecarLine(moduleDir, "variant");
 }
 
 // Enumerate all manifests under the given embedded + user dir lists,
@@ -618,6 +718,13 @@ static std::map<std::string, ScanEntry> enumerateManifests(
             scan.installDir = entry.path().string();
             scan.installType = installType;
             scan.mainFilePath = resolveMainFilePath(manifest, entry.path(), variants);
+            // Who published this copy, as OBSERVED at install time. Read from
+            // the same directory and by the same mechanism as `variant`
+            // above; nullopt whenever nothing was recorded, which is every
+            // embedded package (they never pass through installPluginFile) and
+            // every install predating the sidecar.
+            scan.observedSigner =
+                PackageManagerLib::readInstalledSigner(entry.path().string());
 
             // Surface the variant-mismatch silent-drop (logos-basecamp#191): a
             // module installed for a variant this build does not accept is
@@ -720,6 +827,7 @@ static InstalledPackage scanToInstalledPackage(const ScanEntry& scan)
     p.installType = scan.installType;
     p.installDir  = scan.installDir;
     p.mainFilePath = scan.mainFilePath;
+    p.observedSigner = scan.observedSigner;
     // Split the scanned entries into the name list every consumer already
     // reads and the constrained subset. Built here, in one place, so the two
     // views cannot drift.
@@ -851,8 +959,9 @@ std::optional<DependencyTreeNode> PackageManagerLib::resolveDependencies(const s
         }
 
         const auto& scan = it->second;
-        node.version     = scan.version;
-        node.installType = scan.installType;
+        node.version        = scan.version;
+        node.installType    = scan.installType;
+        node.observedSigner = scan.observedSigner;
         // An absent range means the parent declared no constraint and anything
         // installed satisfies it. A range that does not PARSE is treated as
         // unsatisfied rather than ignored: silently dropping a typo'd range
@@ -862,6 +971,62 @@ std::optional<DependencyTreeNode> PackageManagerLib::resolveDependencies(const s
         node.status = (!dep.version || logos::semver::satisfies(scan.version, *dep.version))
                           ? DependencyStatus::Installed
                           : DependencyStatus::VersionMismatch;
+
+        // ── The signer pin: IS THIS THE SAME PACKAGE? ──────────────────────
+        //
+        // Evaluated when and ONLY when the edge carries a pin. An unpinned
+        // edge does not care who published its dependency and must keep
+        // resolving byte-identically to before — which is every edge in the
+        // fleet today.
+        //
+        // Compared against what was OBSERVED (a signature this build verified
+        // at install time), never against what a package CLAIMS: signer_did is
+        // populated by logos-package before the Ed25519 check, so a forged
+        // manifest.sig naming the pinned DID would satisfy a claim-based
+        // comparison while satisfying nothing real.
+        //
+        // Combined with the range verdict through edgeVerdictSeverity rather
+        // than by assignment, because ONE EDGE can fail both constraints and
+        // the node reports one status. A signer mismatch outranks a version
+        // mismatch ("requires ^2.0.0, found 1.0.0" sends the user after a
+        // newer build of a package that is not theirs at any version), while a
+        // signer we merely could not CHECK ranks below one — missing evidence
+        // must never mask an actionable rejection. Absence outranks all of it
+        // and has already returned above.
+        //
+        // Taking the max also means a satisfied pin never IMPROVES a status:
+        // the right publisher at the wrong version is still the wrong version.
+        if (dep.signer) {
+            DependencyStatus signerVerdict = DependencyStatus::Installed;
+            if (!scan.observedSigner) {
+                signerVerdict = (m_unknownSignerPolicy == UnknownSignerPolicy::Strict)
+                                    ? DependencyStatus::SignerMismatch
+                                    : DependencyStatus::SignerUnknown;
+            } else if (*scan.observedSigner != *dep.signer) {
+                signerVerdict = DependencyStatus::SignerMismatch;
+            }
+            if (edgeVerdictSeverity(signerVerdict) > edgeVerdictSeverity(node.status))
+                node.status = signerVerdict;
+        }
+
+        // Say it once, at the one moment it is decided. SignerMismatch is
+        // definitive, rare, and the remedy (this is somebody else's package)
+        // is not guessable from a bare load failure — the exact class of fact
+        // this scanner keeps being fixed for dropping silently.
+        //
+        // SignerUnknown deliberately does NOT warn: it is the expected state
+        // for every embedded package and every install predating the sidecar,
+        // and a warning that fires on the normal case trains readers to
+        // ignore the channel. It travels on the status and on `lgpm info`
+        // instead.
+        if (node.status == DependencyStatus::SignerMismatch) {
+            std::cerr << "Warning: dependency '" << dep.name << "' is pinned to signer "
+                      << *dep.signer << " but the installed package in " << scan.installDir
+                      << " was published by "
+                      << (scan.observedSigner ? *scan.observedSigner
+                                              : std::string("nobody recorded (no verified signature at install)"))
+                      << "; it is a different package under the same name.\n";
+        }
 
         path.insert(dep.name);
         node.children.reserve(scan.dependencies.size());
@@ -972,15 +1137,28 @@ std::vector<DependencyTreeNode> DependencyTreeNode::flatten() const
             // shows the mismatch, resolveFlatDependencies did not — and the
             // flat list is the only projection basecamp's load gate reads.
             //
-            // So a later edge that REJECTS what an earlier edge accepted
-            // promotes the row, carrying its constraint so the report can name
-            // the range that failed. Only Installed -> VersionMismatch: the
-            // other statuses are properties of the package rather than the
-            // edge (an absent package is absent on every edge) or structural
-            // (Cycle), and neither can be contradicted by a second edge.
+            // So a later edge that judges the package MORE HARSHLY than the
+            // recorded one promotes the row, carrying its constraint so the
+            // report can name what failed. Ordered by edgeVerdictSeverity, so
+            // adding a status to the vocabulary means placing it in that one
+            // ranking rather than extending a chain of pairwise ifs — the
+            // original rule was written as the single pair
+            // `Installed -> VersionMismatch`, which would silently have kept
+            // dropping a deeper SIGNER mismatch exactly the way it once
+            // dropped a deeper version one.
+            //
+            // Only the edge-decided statuses participate: NotInstalled and
+            // Cycle score -1, so they neither promote nor are promoted (an
+            // absent package is absent on every edge).
+            //
+            // `observedSigner` is NOT carried across: it is a property of the
+            // installed package, identical on every edge that reaches it,
+            // whereas requiredVersion/requiredSigner belong to the promoting
+            // edge and must travel with it.
             DependencyTreeNode& recorded = out[slot->second];
-            if (recorded.status == DependencyStatus::Installed &&
-                n->status == DependencyStatus::VersionMismatch) {
+            const int recordedRank = edgeVerdictSeverity(recorded.status);
+            const int candidateRank = edgeVerdictSeverity(n->status);
+            if (recordedRank >= 0 && candidateRank > recordedRank) {
                 recorded.status          = n->status;
                 recorded.requiredVersion = n->requiredVersion;
                 recorded.requiredSigner  = n->requiredSigner;
@@ -994,6 +1172,7 @@ std::vector<DependencyTreeNode> DependencyTreeNode::flatten() const
         copy.installType     = n->installType;
         copy.requiredVersion = n->requiredVersion;
         copy.requiredSigner  = n->requiredSigner;
+        copy.observedSigner  = n->observedSigner;
         out.push_back(std::move(copy));
         for (const auto& c : n->children) queue.push_back(&c);
     }
@@ -1388,6 +1567,44 @@ void PackageManagerLib::setSignaturePolicy(SignaturePolicy policy)
 void PackageManagerLib::setKeyringDirectory(const std::string& dir)
 {
     m_keyringDir = dir;
+}
+
+void PackageManagerLib::setUnknownSignerPolicy(UnknownSignerPolicy policy)
+{
+    m_unknownSignerPolicy = policy;
+}
+
+std::optional<std::string> PackageManagerLib::observedSignerFrom(
+    const SignatureVerificationResult& result)
+{
+    // Stated as everything that must hold, the way signerPinMatches and
+    // downloadedSignerBinds are, so the term that matters cannot be dropped
+    // by someone reading the other two as sufficient.
+    //
+    // `is_signed` is deliberately NOT consulted: signature_valid already
+    // implies it, and naming it here would suggest the pair is the test.
+    if (!result.signature_valid) return std::nullopt;
+    if (result.signer_did.empty()) return std::nullopt;
+    return result.signer_did;
+}
+
+const char* PackageManagerLib::observedSignerFileName()
+{
+    return "signer";
+}
+
+std::optional<std::string> PackageManagerLib::readInstalledSigner(const std::string& moduleDir)
+{
+    const std::string did = readSidecarLine(fs::path(moduleDir), observedSignerFileName());
+    // Absent file and empty file collapse to the SAME answer on purpose. An
+    // empty string is never written (the writer is gated on a non-empty DID),
+    // so seeing one means a truncated or hand-made file — and returning it as
+    // an identity would let "" compare against a pin, or be mistaken for
+    // "observed to be unsigned". There is no such observation; the only two
+    // answers this file can carry are "this DID" and "nothing recorded".
+    if (did.empty())
+        return std::nullopt;
+    return did;
 }
 
 SignatureVerificationResult PackageManagerLib::verifyPackageSignature(const std::string& lgxPath)

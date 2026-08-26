@@ -42,6 +42,13 @@ void to_json(nlohmann::json& j, const InstalledPackage& p)
     // or a signer DID, so today's manifests serialise byte-identically.
     if (!p.dependencyConstraints.empty())
         j["dependencyConstraints"] = p.dependencyConstraints;
+    // The publisher this copy's signature was VERIFIED against. Additive, and
+    // emitted only when something was actually observed — so an unsigned,
+    // embedded or pre-sidecar install serialises byte-identically to before,
+    // and a reader can tell "no publisher recorded" (key absent) from a
+    // recorded one. A key present with an empty value would be neither.
+    if (p.observedSigner)
+        j["observedSigner"] = *p.observedSigner;
     j["hashes"]       = p.hashes;
     j["installType"]  = installTypeToString(p.installType);
     j["installDir"]   = p.installDir;
@@ -58,7 +65,7 @@ void to_json(nlohmann::json& j, const DependencyTreeNode& n)
     // the lib returned JSON directly. VersionMismatch resolved to a real
     // installed package, so it carries both — the version actually present is
     // the half of the report `requiredVersion` is compared against.
-    if (n.status == DependencyStatus::Installed || n.status == DependencyStatus::VersionMismatch) {
+    if (nodeResolvedToAnInstalledPackage(n.status)) {
         j["version"]     = n.version;
         j["installType"] = installTypeToString(n.installType);
     } else {
@@ -70,6 +77,10 @@ void to_json(nlohmann::json& j, const DependencyTreeNode& n)
     // serialises byte-identically to before.
     if (n.requiredVersion) j["requiredVersion"] = *n.requiredVersion;
     if (n.requiredSigner)  j["requiredSigner"]  = *n.requiredSigner;
+    // The other half of a signer report: who actually published what is
+    // installed. Absent when nothing recorded a publisher — which is what
+    // makes a `signer_unknown` row legible without a second lookup.
+    if (n.observedSigner)  j["observedSigner"]  = *n.observedSigner;
     j["children"] = n.children;
 }
 

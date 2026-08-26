@@ -732,10 +732,23 @@ TEST_F(DependencyResolutionTest, MismatchedNodeCarriesBothVersions) {
     EXPECT_EQ(*dep.requiredVersion, "^2.0.0");
 }
 
-TEST_F(DependencyResolutionTest, SignerIsCarriedButNotEvaluated) {
-    // Deliberate scope line: whether a publisher DID is acceptable is a trust
-    // decision, not a scan result. The pin travels as data so whoever settles
-    // that policy has it; an unsatisfiable-looking signer changes no status.
+TEST_F(DependencyResolutionTest, SignerIsEvaluatedWhenThePinIsPresent) {
+    // This test used to assert the OPPOSITE — status Installed, on the stated
+    // grounds that "whether a publisher DID is acceptable is a trust decision,
+    // not a scan result". That scope line was drawn around the wrong question.
+    //
+    // Whether a publisher may be installed AT ALL is indeed a trust decision,
+    // it is authorization, and it belongs to the trust-anchor gate in
+    // installPluginFile — which is why this walk still consults no keyring.
+    // But a `signer` pin does not ask that. It asks WHICH `lib` this is: the
+    // one its dependant named, or somebody else's package under the same
+    // name. That is an identity question, the same kind as "is this package
+    // called lib", and resolving identity is precisely this walk's job. When
+    // the pin is present it is as load-bearing as the name.
+    //
+    // Here nothing records who published the installed `lib`, so the honest
+    // answer is neither "fine" nor "wrong publisher" but signer_unknown — see
+    // UnknownSignerPolicy. The full behaviour lives in test_observed_signer.cpp.
     writeManifestRawDeps(modulesDir, "app",
                          json::array({ json{{"name", "lib"},
                                             {"signer", "did:jwk:eyJrdHkiOiJPS1AifQ"}} }));
@@ -748,10 +761,13 @@ TEST_F(DependencyResolutionTest, SignerIsCarriedButNotEvaluated) {
     ASSERT_TRUE(tree);
     ASSERT_EQ(tree->children.size(), 1u);
     const auto& dep = tree->children[0];
-    EXPECT_EQ(dep.status, DependencyStatus::Installed);
+    EXPECT_EQ(dep.status, DependencyStatus::SignerUnknown);
     ASSERT_TRUE(dep.requiredSigner.has_value());
     EXPECT_EQ(*dep.requiredSigner, "did:jwk:eyJrdHkiOiJPS1AifQ");
     EXPECT_FALSE(dep.requiredVersion.has_value());
+    // It IS on disk, and the row says so — an unknown publisher is not an
+    // absent package.
+    EXPECT_EQ(dep.version, "1.0.0");
 }
 
 TEST_F(DependencyResolutionTest, UnparseableRangeIsUnsatisfied) {

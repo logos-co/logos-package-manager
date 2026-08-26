@@ -285,6 +285,15 @@ static int cmdInfo(PackageManagerLib& pm, const std::string& packageName, bool j
         std::cout << "Category: " << found.category << "\n";
         std::cout << "Author: " << found.author << "\n";
         std::cout << "Directory: " << found.installDir << "\n";
+        // WHO PUBLISHED THIS COPY. Only ever a DID whose signature over this
+        // package verified at install time; anything else prints as unknown,
+        // never as "unsigned" — nothing on disk records that distinction, and
+        // claiming it would be the same claim-vs-observation confusion the
+        // sidecar exists to avoid.
+        std::cout << "Signer: "
+                  << (found.observedSigner ? *found.observedSigner
+                                           : std::string("(not recorded)"))
+                  << "\n";
 
         if (!found.dependencies.empty()) {
             // Render the declared constraint alongside the name when the
