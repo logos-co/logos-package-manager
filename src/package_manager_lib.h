@@ -168,8 +168,15 @@ struct DependencyTreeNode {
     //
     // Note the dedup interacts with the per-edge constraint fields: when two
     // parents depend on the same package under different ranges, the flat list
-    // keeps whichever edge BFS reached first. Callers that must see every
-    // constraint on a package walk the tree instead of flattening it.
+    // keeps whichever edge BFS reached first — EXCEPT that a later edge which
+    // rejects the installed version promotes the row to VersionMismatch and
+    // carries its own range. A package satisfies its dependants only if it
+    // satisfies all of them, and BFS reaches the shallowest edge first, which
+    // in today's fleet is almost always an unconstrained one; without the
+    // promotion a mismatch one level down was silently dropped from the only
+    // projection the flat API and basecamp's load gate ever read. Callers that
+    // must see EVERY constraint on a package still walk the tree instead of
+    // flattening it — the flat row reports one failing range, not all of them.
     std::vector<DependencyTreeNode> flatten() const;
 };
 
