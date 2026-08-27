@@ -285,12 +285,10 @@ static int cmdInfo(PackageManagerLib& pm, const std::string& packageName, bool j
         std::cout << "Category: " << found.category << "\n";
         std::cout << "Author: " << found.author << "\n";
         std::cout << "Directory: " << found.installDir << "\n";
-        // WHO SIGNED THIS COPY, according to the signature installed beside
-        // it — printed only once that signature has been checked against the
-        // key its own DID carries, so this is never a bare unchecked claim.
-        // It is still SELF-asserted as to which identity: settling that needs
-        // an outside reference (a dependant's pin, or the keyring), so the
-        // label says so rather than implying more than was established.
+        // signerDid is set only after the installed signature verified against
+        // the key its own DID carries, so the value itself is checked. WHICH
+        // identity that is stays self-asserted until an outside reference (a
+        // dependant's pin, the keyring) settles it — hence the label.
         std::cout << "Signer: "
                   << (found.signerDid ? *found.signerDid + " (self-asserted)"
                                       : std::string("(no signature installed)"))

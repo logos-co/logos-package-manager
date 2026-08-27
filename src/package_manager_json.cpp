@@ -42,12 +42,9 @@ void to_json(nlohmann::json& j, const InstalledPackage& p)
     // or a signer DID, so today's manifests serialise byte-identically.
     if (!p.dependencyConstraints.empty())
         j["dependencyConstraints"] = p.dependencyConstraints;
-    // The DID the installed manifest.sig names, once checked against its own
-    // embedded key — see InstalledPackage::signerDid. Additive, and emitted
-    // only when a usable signature is installed, so an unsigned or embedded
-    // package serialises byte-identically to before and a reader can tell "no
-    // signature" (key absent) from a signed one. A key present with an empty
-    // value would be neither.
+    // Omitted, not empty-valued, when no usable signature is installed: an
+    // absent key is how a reader tells unsigned from signed, which an empty
+    // string would not. See InstalledPackage::signerDid.
     if (p.signerDid)
         j["signerDid"] = *p.signerDid;
     j["hashes"]       = p.hashes;
@@ -64,8 +61,7 @@ void to_json(nlohmann::json& j, const DependencyTreeNode& n)
     // For Cycle and NotInstalled nodes, installType has no meaningful value;
     // emit the empty string to match the legacy wire format produced when
     // the lib returned JSON directly. VersionMismatch resolved to a real
-    // installed package, so it carries both — the version actually present is
-    // the half of the report `requiredVersion` is compared against.
+    // installed package, so it keeps both.
     if (nodeResolvedToAnInstalledPackage(n.status)) {
         j["version"]     = n.version;
         j["installType"] = installTypeToString(n.installType);
@@ -73,17 +69,13 @@ void to_json(nlohmann::json& j, const DependencyTreeNode& n)
         j["version"]     = "";
         j["installType"] = "";
     }
-    // Additive, and absent unless the parent edge declared one — so a tree of
-    // bare-name dependencies, which is every package in the workspace today,
-    // serialises byte-identically to before.
+    // Additive: absent unless the parent edge declared one.
     if (n.requiredVersion) j["requiredVersion"] = *n.requiredVersion;
     if (n.requiredSigner)  j["requiredSigner"]  = *n.requiredSigner;
-    // The other half of a signer report: who the installed package's own
-    // signature says signed it. Absent when no usable signature is installed —
-    // which is what makes a `signer_unknown` row legible without a second
-    // lookup. NOT the field `status` was derived from: the verdict comes from
-    // verifying that signature against `requiredSigner`'s key, so these two
-    // can differ without the row being inconsistent.
+    // Who the installed package's own signature says signed it; absent when
+    // none is installed. NOT what `status` was derived from — that verdict
+    // comes from verifying against `requiredSigner`'s key — so the two can
+    // differ without the row being inconsistent.
     if (n.signerDid)  j["signerDid"]  = *n.signerDid;
     j["children"] = n.children;
 }

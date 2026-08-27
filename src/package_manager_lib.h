@@ -19,107 +19,49 @@ enum class InstallType {
     User,
 };
 
-// Whether a dependency is currently installed, absent, part of a cycle,
-// installed at a version its dependant refused, or installed but published by
-// somebody other than the publisher its dependant named.
+// Whether a dependency is installed, absent, part of a cycle, installed at a
+// version its dependant refused, or installed under a different publisher.
 //
-// New enumerators are APPENDED, never inserted. This enum crosses a shared
-// library boundary — logos-package-manager-module compiles against this header
-// and links libpackage_manager_lib at run time — so the numeric value of an
-// existing enumerator is ABI.
+// APPEND new enumerators, never insert: this enum crosses a shared library
+// boundary (logos-package-manager-module compiles against this header and
+// links libpackage_manager_lib at run time), so existing values are ABI.
 enum class DependencyStatus {
     Installed,
     NotInstalled,
     Cycle,
-    // The package IS installed, but its version does not satisfy the semver
-    // range the depending manifest declared for this edge. Distinct from
-    // NotInstalled on purpose: the two call for different remedies (install it
-    // vs. change a version), and only absence can be asserted without reading
-    // a constraint. `version` and `installType` are populated on such a node —
-    // the version actually present is the whole point of the report.
+    // Installed, but the version does not satisfy the semver range this edge
+    // declared. Distinct from NotInstalled: different remedy, and only absence
+    // can be asserted without reading a constraint. `version` and
+    // `installType` are populated.
     VersionMismatch,
-    // A package by that name IS installed, and it is provably NOT the one the
-    // dependant named: the key whose signature this install was verified
-    // against is not the `signer` DID on the edge.
-    //
-    // This is an IDENTITY answer, not a trust one. `my_module` published by me
-    // and `my_module` published by anybody else are different packages that
-    // happen to share a name, and telling them apart is the same kind of
-    // question as "is this package called my_module" — squarely the scanner's
-    // job. Whether a given publisher may be installed AT ALL is the separate
-    // question the trust-anchor gate in installPluginFile answers, and neither
-    // check substitutes for the other:
-    //
-    //   trust anchor : does any active anchor vouch for this key?  -> may it
-    //                                                                 be installed
-    //   signer pin   : is this the key the dependant named?        -> is it the
-    //                                                                 same package
-    //
-    // `version` and `installType` are populated — something is on disk.
+    // Installed under that name, and provably not the package the dependant
+    // named: the install's signature does not verify against the key in the
+    // edge's `signer` DID. An IDENTITY answer, not an authorization one —
+    // whether a publisher may be installed at all is the separate trust-anchor
+    // gate in installPluginFile. `version` and `installType` are populated.
     SignerMismatch,
     // The edge names a `signer`, a package by that name is installed, and
-    // NOTHING RECORDS WHO PUBLISHED IT. Absence of evidence, not evidence of
-    // mismatch, and reported as its own status rather than folded into either
-    // neighbour — see `UnknownSignerPolicy` for the whole argument and for the
-    // one line that flips it.
-    //
-    // `version` and `installType` are populated — something is on disk.
+    // nothing records who published it — absence of evidence, not a mismatch.
+    // Which way that falls is UnknownSignerPolicy. `version` and `installType`
+    // are populated.
     SignerUnknown,
 };
 
-// What to report for an edge that pins a `signer` when the installed package
-// has NO recorded publisher at all.
+// What resolveDependencies reports for a `signer`-pinned edge when the
+// installed package records no publisher at all: embedded packages never pass
+// through installPluginFile and so can never acquire the `signer` sidecar, and
+// neither can installs predating it or made under SignaturePolicy::NONE.
 //
-// ── The design call, stated where it is made ──────────────────────────────
-//
-// An installed package records its publisher only when installPluginFile
-// VERIFIED a signature at install time (the `signer` sidecar, mirroring the
-// `variant` one). Three populations legitimately have no such record:
-//
-//   1. EMBEDDED packages — shipped with the app, placed by the build, never
-//      passed through installPluginFile at all. These can never acquire a
-//      sidecar; the same is already true of the `variant` file, whose reader
-//      documents "absent (e.g. embedded or legacy installs)".
-//   2. Packages installed BEFORE this change existed.
-//   3. Packages installed under SignaturePolicy::NONE, where no verification
-//      happened, and unsigned packages installed under WARN.
-//
-// Reporting those as SignerMismatch would be fail-closed, and it is wrong for
-// population 1 specifically: a pin on an embedded dependency would be
-// unsatisfiable BY CONSTRUCTION, forever, with no action the user could take.
-// That is not a strict policy, it is a broken one. It is also a different
-// sentence to say to a user — "this is a different publisher's package" is an
-// accusation; "nobody recorded who published this" is a gap.
-//
-// Measured before choosing (2026-08-26, whole workspace): 110 metadata.json,
-// 65 declared dependency edges, ZERO object-form entries — so zero signer
-// pins and zero version ranges — zero manifest.sig anywhere, and the shared
-// release workflow publishes `signing_mode: none`. The number of packages
-// either option changes TODAY is zero, under both. So the choice is not about
-// blast radius; it decides whether pins can be adopted at all, and Lenient is
-// the only option under which they can.
-//
-// THE RESIDUAL, stated because Lenient does not close it. An UNSIGNED package
-// records nothing, so an unsigned impostor installed under a pinned name is
-// reported SignerUnknown and does not block. The pin catches a different
-// publisher; it does not catch "no publisher". That gap is bounded — under
-// SignaturePolicy::REQUIRE an unsigned package cannot be installed at all, so
-// it exists only under WARN/NONE, where the whole signature story is already
-// advisory. The clean fix is not Strict (which also condemns embedded and
-// legacy installs) but recording an explicit "verified: unsigned" OBSERVATION,
-// which would separate "we looked and it is unsigned" from "nobody looked" and
-// let the first be judged. That is a change to what install records, not to
-// this policy, and is deliberately not made here.
-//
-// Default: Lenient. Flip the whole build by changing this initialiser, or one
-// instance with setUnknownSignerPolicy(UnknownSignerPolicy::Strict).
+// Default Lenient (flip with setUnknownSignerPolicy), because under Strict a
+// pin on an embedded dependency is unsatisfiable by construction, forever,
+// with nothing the user can do. Residual: an unsigned impostor under a pinned
+// name also records nothing, so it reports SignerUnknown and does not block —
+// bounded by SignaturePolicy::REQUIRE, which refuses unsigned installs.
 enum class UnknownSignerPolicy {
-    // No record -> DependencyStatus::SignerUnknown. Surfaced, does not claim a
-    // mismatch it cannot prove.
+    // No record -> SignerUnknown. Surfaced; claims no mismatch it cannot prove.
     Lenient,
-    // No record -> DependencyStatus::SignerMismatch. Fail closed: only a
-    // package whose signature was verified against the pinned key satisfies
-    // the pin.
+    // No record -> SignerMismatch. Fail closed: only a signature verified
+    // against the pinned key satisfies the pin.
     Strict,
 };
 
@@ -219,28 +161,16 @@ struct InstalledPackage {
     // the semantic evaluation of these constraints belongs to the resolver in
     // logos-package-downloader and, at load time, to the runtime.
     std::vector<PackageDependency> dependencyConstraints;
-    // WHO SIGNED THIS COPY — the DID named by the installed `manifest.sig`,
-    // reported only once that signature has been checked against the key that
-    // DID itself carries. So it means: somebody holding this key produced a
-    // real Ed25519 signature over the manifest.json sitting next to it.
+    // The DID from the installed `manifest.sig`, set only once that signature
+    // verified against the key the DID itself carries — self-consistent, so it
+    // proves nothing about identity: whoever replaces manifest.sig replaces the
+    // DID beside it and this reports THEIRS. Use it for DISPLAY; never compare
+    // it to a pin — resolveDependencies and the trust-anchor gate supply an
+    // outside key instead.
     //
-    // It does NOT mean the package is who it says it is. A did:jwk embeds its
-    // own public key, so an attacker who replaces manifest.sig replaces the
-    // DID beside it, signs with a key they own, and this field reports THEIR
-    // DID, self-consistently. That is not a weakness to defend against; it is
-    // simply the limit of what one file can say about itself. Deciding WHICH
-    // identity is correct needs an outside reference — a dependant's `signer`
-    // pin (resolveDependencies) or the local keyring (the trust-anchor gate),
-    // and both of those supply the key themselves rather than reading it here.
-    //
-    // Use it for DISPLAY. Never compare it to a pin: see the pin block in
-    // resolveDependencies for why that comparison is unsound.
-    //
-    // nullopt means no usable signature is installed — no manifest.sig at all
-    // (every embedded package, since none passes through installPluginFile,
-    // and every unsigned one), or one that does not verify even under its own
-    // DID (a leftover from a previous install, a planted file, a corrupted
-    // one). It never means "unsigned": absence of evidence is not a finding.
+    // nullopt = no usable signature installed: no manifest.sig (every embedded
+    // and every unsigned package) or one that does not verify even under its
+    // own DID. It never means "unsigned".
     std::optional<std::string> signerDid;
     Hashes hashes;
     InstallType installType;
@@ -254,39 +184,23 @@ struct InstalledPackage {
 struct DependencyTreeNode {
     std::string name;
     DependencyStatus status;
-    // Empty for NotInstalled and Cycle; the version actually installed for
-    // both Installed and VersionMismatch.
+    // Both populated whenever nodeResolvedToAnInstalledPackage(status); empty
+    // and unspecified for NotInstalled and Cycle.
     std::string version;
-    InstallType installType;                // meaningful on the same two states
-    // The constraint the PARENT declared on this edge, verbatim, absent when
-    // the parent named the dependency without one (and always absent on the
-    // root, which no edge points at). BOTH are judged: `requiredVersion`
-    // against `version`, `requiredSigner` by VERIFYING the installed
-    // `status` reports whichever failed.
-    //
-    // `requiredSigner` used to be carried as data only, on the grounds that
-    // "who may sign a dependency is a trust decision that does not belong to
-    // the scanner". That reasoning was backwards, and it is worth writing down
-    // why so it is not reintroduced. A signer pin is what separates
-    // `my_module` published by me from `my_module` published by anybody else.
-    // When the pin is present it is as much a part of the dependency's IDENTITY
-    // as its name, and resolving identity is exactly what this walk does. The
-    // sentence was true of a DIFFERENT question — may this publisher be
-    // installed at all — which is authorization, is answered by the
-    // trust-anchor gate in installPluginFile against the local keyring, and
-    // never reaches here. Skipping the identity check because the trust check
-    // belongs elsewhere conflated the two and did neither.
+    InstallType installType;
+    // The constraint the PARENT declared on this edge, verbatim; absent when
+    // the parent named the dependency without one, and always absent on the
+    // root, which no edge points at. Both are judged — `requiredVersion`
+    // against `version`, `requiredSigner` by verifying the installed signature
+    // against the pinned key (never by comparing DID strings) — and `status`
+    // reports whichever failed.
     std::optional<std::string> requiredVersion;
     std::optional<std::string> requiredSigner;
-    // What the installed package's own signature says about itself — see
-    // InstalledPackage::signerDid. Populated on any node that resolved to an
-    // installed package (whatever its status), absent on NotInstalled and
-    // Cycle nodes, and absent when no usable signature is installed.
-    //
-    // Travels next to `requiredSigner` so a report can name BOTH sides:
-    // "requires <pin>, signed by <did>" is actionable, and either half alone
-    // is not. `status` is NOT derived by comparing the two — it comes from
-    // verifying the installed signature against the PIN's key.
+    // What the installed package's signature says about itself — see
+    // InstalledPackage::signerDid. Present on any node that resolved to an
+    // installed package carrying a usable signature. Sits next to
+    // `requiredSigner` so a report can name both sides ("requires <pin>,
+    // signed by <did>"); `status` is NOT derived by comparing the two.
     std::optional<std::string> signerDid;
     std::vector<DependencyTreeNode> children;
 
@@ -295,18 +209,13 @@ struct DependencyTreeNode {
     // vectors on returned copies are left empty — consumers iterate the
     // flat output without double-counting.
     //
-    // Note the dedup interacts with the per-edge constraint fields: when two
-    // parents depend on the same package under different constraints, the flat
-    // list keeps whichever edge BFS reached first — EXCEPT that a later edge
-    // which judges the installed package MORE HARSHLY promotes the row and
-    // carries its own constraint. A package satisfies its dependants only if it
-    // satisfies all of them, and BFS reaches the shallowest edge first, which
-    // in today's fleet is almost always an unconstrained one; without the
-    // promotion a mismatch one level down was silently dropped from the only
-    // projection the flat API and basecamp's load gate ever read. Callers that
-    // must see EVERY constraint on a package still walk the tree instead of
-    // flattening it — the flat row reports one failing constraint, not all of
-    // them.
+    // The dedup interacts with the per-edge constraint fields: two parents may
+    // depend on the same package under different constraints, and the flat list
+    // keeps the edge BFS reached first — EXCEPT that a later edge judging the
+    // package MORE HARSHLY promotes the row and carries its own constraint,
+    // since a package satisfies its dependants only if it satisfies all of
+    // them. The row still reports one failing constraint, not all; callers that
+    // need every constraint walk the tree instead of flattening it.
     std::vector<DependencyTreeNode> flatten() const;
 };
 
@@ -330,15 +239,11 @@ struct DependentTreeNode {
 const char* installTypeToString(InstallType t);
 const char* dependencyStatusToString(DependencyStatus s);
 
-// Did this node resolve to a package that is actually ON DISK?
-//
-// True for every status except NotInstalled and Cycle. It decides whether
-// `version` / `installType` carry meaning on a serialised node, and it is the
-// reason to have a predicate rather than an `||` chain at each site: the chain
-// was written as `Installed || VersionMismatch`, so each newly appended
-// edge-decided status (SignerMismatch, SignerUnknown — both of which resolved
-// to a real installed package) would have started reporting an empty version
-// at two call sites in two repositories, quietly.
+// Did this node resolve to a package that is actually ON DISK? True for every
+// status except NotInstalled and Cycle, and so decides whether `version` /
+// `installType` carry meaning. A predicate rather than an `||` chain at each
+// site: an appended installed-but-rejected status would otherwise silently
+// start reporting an empty version at call sites in other repositories.
 bool nodeResolvedToAnInstalledPackage(DependencyStatus s);
 
 class PackageManagerLib
@@ -474,9 +379,8 @@ public:
     void setKeyringDirectory(const std::string& dir);
     std::string keyringDirectory() const { return m_keyringDir; }
 
-    // What resolveDependencies reports for a signer pin against an installed
-    // package with no recorded publisher — THE flip for the design call
-    // documented on UnknownSignerPolicy. Default Lenient.
+    // What resolveDependencies reports for a signer-pinned edge whose
+    // installed package records no publisher. Default Lenient.
     void setUnknownSignerPolicy(UnknownSignerPolicy policy);
     UnknownSignerPolicy unknownSignerPolicy() const { return m_unknownSignerPolicy; }
 
@@ -501,8 +405,7 @@ private:
     std::vector<std::string> m_embeddedUiPluginsDirs;
     std::string m_userUiPluginsDir;
     SignaturePolicy m_signaturePolicy = SignaturePolicy::WARN;
-    // THE FLIP for the unknown-signer design call. Change this initialiser to
-    // ::Strict to fail closed build-wide; see UnknownSignerPolicy.
+    // Build-wide default; see UnknownSignerPolicy.
     UnknownSignerPolicy m_unknownSignerPolicy = UnknownSignerPolicy::Lenient;
     std::string m_keyringDir;
 };

@@ -630,19 +630,10 @@ TEST_F(DependencyResolutionTest, WellFormedDependenciesWarnAboutNothing) {
     EXPECT_EQ(err.find("malformed dependencies[] entry"), std::string::npos) << err;
 }
 
-// ---------------------------------------------------------------------------
-// Constraint EVALUATION.
-//
-// The block above proves the range survives the scan. These prove something
-// asks it a question. Before this, resolveDependencies called build(dep.name)
-// and threw dep.version away one character from where it was needed, so a
-// dependency pinned to ^2.0.0 with 1.0.0 installed reported "installed" —
-// the range was carried the whole way and evaluated nowhere.
-// ---------------------------------------------------------------------------
+// Constraint EVALUATION. The block above proves the range survives the scan;
+// these prove something compares it against the installed version.
 
 TEST_F(DependencyResolutionTest, UnsatisfiedRangeReportsVersionMismatch) {
-    // THE headline case: neither constraint is met, and the old code said
-    // "installed" because it never compared anything.
     writeManifestRawDeps(modulesDir, "app",
                          json::array({ json{{"name", "lib"}, {"version", "^2.0.0"}} }));
     writeManifest(modulesDir, "lib", "core", {}, "1.0.0");
@@ -660,7 +651,7 @@ TEST_F(DependencyResolutionTest, UnsatisfiedRangeReportsVersionMismatch) {
 }
 
 TEST_F(DependencyResolutionTest, SatisfiedRangeStaysInstalled) {
-    // The control. Same shape, a version inside the range: nothing changes.
+    // Control: same shape, a version inside the range.
     writeManifestRawDeps(modulesDir, "app",
                          json::array({ json{{"name", "lib"}, {"version", "^2.0.0"}} }));
     writeManifest(modulesDir, "lib", "core", {}, "2.1.0");
@@ -675,8 +666,8 @@ TEST_F(DependencyResolutionTest, SatisfiedRangeStaysInstalled) {
 }
 
 TEST_F(DependencyResolutionTest, UnconstrainedDependencyIsNeverAMismatch) {
-    // Every package in the fleet today is this case. Whatever is installed
-    // satisfies "no range", so the new status must be unreachable for it.
+    // Every package in the fleet is bare-name today, and whatever is installed
+    // satisfies "no range" — so the new status must be unreachable for them.
     writeManifest(modulesDir, "app", "core", {"lib"});
     writeManifest(modulesDir, "lib", "core", {}, "0.0.1");
 
@@ -691,11 +682,8 @@ TEST_F(DependencyResolutionTest, UnconstrainedDependencyIsNeverAMismatch) {
 }
 
 TEST_F(DependencyResolutionTest, AbsenceOutranksVersionMismatch) {
-    // A dependency that is BOTH absent and version-constrained reports
-    // absence. A range cannot be judged against a version we do not have, the
-    // remedy is "install it" either way, and version_mismatch would point the
-    // user at the wrong fix. The range still rides along so a caller can say
-    // WHICH version to install.
+    // Absent + constrained reports absence: there is no version to judge it
+    // against. The range still rides along, so a caller knows which to install.
     writeManifestRawDeps(modulesDir, "app",
                          json::array({ json{{"name", "absent"}, {"version", "^2.0.0"}} }));
 
@@ -711,9 +699,8 @@ TEST_F(DependencyResolutionTest, AbsenceOutranksVersionMismatch) {
 }
 
 TEST_F(DependencyResolutionTest, MismatchedNodeCarriesBothVersions) {
-    // "Needs ^2.0.0, have 1.4.2" takes two numbers. The installed one comes
-    // from the node, the required one from the edge; a node that reported the
-    // mismatch without the installed version would be half a diagnostic.
+    // "Needs ^2.0.0, have 1.4.2" takes both: the installed version comes from
+    // the node, the required range from the edge.
     writeManifestRawDeps(modulesDir, "app",
                          json::array({ json{{"name", "lib"}, {"version", "^2.0.0"}} }));
     writeManifest(modulesDir, "lib", "core", {}, "1.4.2");
@@ -733,22 +720,12 @@ TEST_F(DependencyResolutionTest, MismatchedNodeCarriesBothVersions) {
 }
 
 TEST_F(DependencyResolutionTest, SignerIsEvaluatedWhenThePinIsPresent) {
-    // This test used to assert the OPPOSITE — status Installed, on the stated
-    // grounds that "whether a publisher DID is acceptable is a trust decision,
-    // not a scan result". That scope line was drawn around the wrong question.
-    //
-    // Whether a publisher may be installed AT ALL is indeed a trust decision,
-    // it is authorization, and it belongs to the trust-anchor gate in
-    // installPluginFile — which is why this walk still consults no keyring.
-    // But a `signer` pin does not ask that. It asks WHICH `lib` this is: the
-    // one its dependant named, or somebody else's package under the same
-    // name. That is an identity question, the same kind as "is this package
-    // called lib", and resolving identity is precisely this walk's job. When
-    // the pin is present it is as load-bearing as the name.
-    //
-    // Here nothing records who published the installed `lib`, so the honest
-    // answer is neither "fine" nor "wrong publisher" but signer_unknown — see
-    // UnknownSignerPolicy. The full behaviour lives in test_observed_signer.cpp.
+    // A `signer` pin asks WHICH `lib` this is — an identity question, so this
+    // walk answers it. Whether a publisher may be installed at all is
+    // authorization and stays with the trust-anchor gate in installPluginFile,
+    // which is why this walk consults no keyring. Nothing here records who
+    // published `lib`, hence signer_unknown; see UnknownSignerPolicy and
+    // test_observed_signer.cpp.
     writeManifestRawDeps(modulesDir, "app",
                          json::array({ json{{"name", "lib"},
                                             {"signer", "did:jwk:eyJrdHkiOiJPS1AifQ"}} }));
@@ -765,15 +742,13 @@ TEST_F(DependencyResolutionTest, SignerIsEvaluatedWhenThePinIsPresent) {
     ASSERT_TRUE(dep.requiredSigner.has_value());
     EXPECT_EQ(*dep.requiredSigner, "did:jwk:eyJrdHkiOiJPS1AifQ");
     EXPECT_FALSE(dep.requiredVersion.has_value());
-    // It IS on disk, and the row says so — an unknown publisher is not an
-    // absent package.
+    // An unknown publisher is not an absent package.
     EXPECT_EQ(dep.version, "1.0.0");
 }
 
 TEST_F(DependencyResolutionTest, UnparseableRangeIsUnsatisfied) {
-    // Fail CLOSED. Dropping a range we cannot parse would turn a typo into a
-    // silently disabled check; `lgx verify` rejects the syntax upstream, so a
-    // manifest that reaches us with one bypassed that gate and should show.
+    // Fail CLOSED: dropping a range we cannot parse turns a typo into a
+    // silently disabled check.
     writeManifestRawDeps(modulesDir, "app",
                          json::array({ json{{"name", "lib"}, {"version", "not-a-range"}} }));
     writeManifest(modulesDir, "lib", "core", {}, "1.0.0");
@@ -788,8 +763,8 @@ TEST_F(DependencyResolutionTest, UnparseableRangeIsUnsatisfied) {
 }
 
 TEST_F(DependencyResolutionTest, VersionMismatchIsFoundDeepInTheTree) {
-    // The constraint is a property of an EDGE, so it has to survive recursion,
-    // not just the first level. a -> b -> c, and only b constrains c.
+    // The constraint belongs to an EDGE, so it must survive recursion:
+    // a -> b -> c, only b constrains c.
     writeManifest(modulesDir, "a", "core", {"b"});
     writeManifestRawDeps(modulesDir, "b",
                          json::array({ json{{"name", "c"}, {"version", ">=3.0.0"}} }));
@@ -832,18 +807,11 @@ TEST_F(DependencyResolutionTest, VersionMismatchSurvivesFlatten) {
 }
 
 TEST_F(DependencyResolutionTest, DeeperMismatchIsNotMaskedByAShallowerBareEdge) {
-    // The DIAMOND, which the chain tests above cannot reach: "lib" is named
-    // twice — once by the root with no range, once by "helper" with one it
-    // does not satisfy. Both facts are true; only one of them survives the
-    // flat list, and flatten() dedupes by name with FIRST-WINS, while BFS
-    // guarantees the depth-1 edge is always reached first. So the
-    // unconstrained edge wins and the mismatch never reaches the flat list —
-    // which is the ONLY projection resolveFlatDependencies and basecamp's
-    // load gate ever read. The tree keeps it; the wire does not.
-    //
-    // Every package in the fleet declares bare names today, so "the root also
-    // depends on it directly, without a range" is the ordinary shape, not an
-    // exotic one.
+    // The DIAMOND: "lib" is named twice — by the root with no range, by
+    // "helper" with one it does not satisfy. flatten() dedupes by name
+    // FIRST-WINS and BFS reaches the depth-1 bare edge first, so the
+    // unsatisfied edge is the one at risk of vanishing from the flat list, the
+    // only projection resolveFlatDependencies and basecamp's load gate read.
     writeManifest(modulesDir, "app", "core", {"lib", "helper"});
     writeManifestRawDeps(modulesDir, "helper",
                          json::array({ json{{"name", "lib"}, {"version", "^2.0.0"}} }));
@@ -862,9 +830,8 @@ TEST_F(DependencyResolutionTest, DeeperMismatchIsNotMaskedByAShallowerBareEdge) 
     ASSERT_EQ(helper.children.size(), 1u);
     ASSERT_EQ(helper.children[0].status, DependencyStatus::VersionMismatch);
 
-    // ...and the flat projection must not lose it. One row per package still,
-    // but the row has to report the constraint that is NOT satisfied: a
-    // package satisfies its dependants only if it satisfies ALL of them.
+    // One row per package still, but it must report the UNsatisfied edge: a
+    // package satisfies its dependants only if it satisfies all of them.
     auto flat = tree->flatten();
     EXPECT_EQ(flat.size(), 2u);
     auto it = std::find_if(flat.begin(), flat.end(),
@@ -878,9 +845,8 @@ TEST_F(DependencyResolutionTest, DeeperMismatchIsNotMaskedByAShallowerBareEdge) 
 }
 
 TEST_F(DependencyResolutionTest, DeeperMismatchSurvivesRegardlessOfDeclarationOrder) {
-    // Same graph, the root's two entries swapped. BFS visits by DEPTH, so the
-    // depth-1 "lib" is reached first either way — declaration order must not
-    // decide whether a user is told about a broken dependency.
+    // Same graph, the root's two entries swapped: BFS visits by DEPTH, so
+    // declaration order must not decide whether the mismatch is reported.
     writeManifest(modulesDir, "app", "core", {"helper", "lib"});
     writeManifestRawDeps(modulesDir, "helper",
                          json::array({ json{{"name", "lib"}, {"version", "^2.0.0"}} }));
@@ -899,9 +865,8 @@ TEST_F(DependencyResolutionTest, DeeperMismatchSurvivesRegardlessOfDeclarationOr
 }
 
 TEST_F(DependencyResolutionTest, ASatisfiedDiamondStaysInstalledAndDeduped) {
-    // The control that keeps the fix from degenerating into "any duplicate is
-    // a mismatch". Two edges, both satisfied: one row, still installed, and
-    // the first edge's constraint is the one reported.
+    // Control against "any duplicate is a mismatch": both edges satisfied, so
+    // one row, still installed, reporting the first edge's constraint.
     writeManifest(modulesDir, "app", "core", {"lib", "helper"});
     writeManifestRawDeps(modulesDir, "helper",
                          json::array({ json{{"name", "lib"}, {"version", "^1.0.0"}} }));
@@ -922,8 +887,7 @@ TEST_F(DependencyResolutionTest, ASatisfiedDiamondStaysInstalledAndDeduped) {
 }
 
 TEST_F(DependencyResolutionTest, RootCarriesNoConstraint) {
-    // Nothing points AT the root, so it has no edge and no range — and it must
-    // never be judged against one.
+    // Nothing points AT the root, so it has no edge and no range to judge.
     writeManifestRawDeps(modulesDir, "app",
                          json::array({ json{{"name", "lib"}, {"version", "^2.0.0"}} }));
     writeManifest(modulesDir, "lib", "core", {}, "1.0.0");
@@ -938,12 +902,8 @@ TEST_F(DependencyResolutionTest, RootCarriesNoConstraint) {
     EXPECT_FALSE(tree->requiredSigner.has_value());
 }
 
-// ---------------------------------------------------------------------------
-// The `lgpm --json` wire format for a dependency tree. Pinned because the two
-// additions have to be ADDITIVE: a tree of bare-name dependencies — which is
-// every package in the workspace today — must serialise exactly as before, or
-// the change is a breaking one dressed up as a feature.
-// ---------------------------------------------------------------------------
+// The `lgpm --json` wire format. The two new keys must be ADDITIVE: a
+// bare-name tree has to serialise exactly as it did before.
 
 TEST_F(DependencyResolutionTest, JsonOmitsConstraintKeysForBareNameDependencies) {
     writeManifest(modulesDir, "app", "core", {"lib"});
