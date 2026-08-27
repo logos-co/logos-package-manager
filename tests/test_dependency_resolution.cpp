@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "package_manager_lib.h"
+#include "package_manager_json.h"
 #include <algorithm>
 #include <deque>
 #include <filesystem>
@@ -627,4 +628,320 @@ TEST_F(DependencyResolutionTest, WellFormedDependenciesWarnAboutNothing) {
     // actually resolve to two edges is MixedStringAndObjectDependenciesBothResolve's
     // job.
     EXPECT_EQ(err.find("malformed dependencies[] entry"), std::string::npos) << err;
+}
+
+// Constraint EVALUATION. The block above proves the range survives the scan;
+// these prove something compares it against the installed version.
+
+TEST_F(DependencyResolutionTest, UnsatisfiedRangeReportsVersionMismatch) {
+    writeManifestRawDeps(modulesDir, "app",
+                         json::array({ json{{"name", "lib"}, {"version", "^2.0.0"}} }));
+    writeManifest(modulesDir, "lib", "core", {}, "1.0.0");
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(modulesDir.string());
+
+    auto tree = pm.resolveDependencies("app");
+    ASSERT_TRUE(tree);
+    ASSERT_EQ(tree->children.size(), 1u);
+    const auto& dep = tree->children[0];
+    EXPECT_EQ(dep.name, "lib");
+    EXPECT_EQ(dep.status, DependencyStatus::VersionMismatch);
+    EXPECT_STREQ(dependencyStatusToString(dep.status), "version_mismatch");
+}
+
+TEST_F(DependencyResolutionTest, SatisfiedRangeStaysInstalled) {
+    // Control: same shape, a version inside the range.
+    writeManifestRawDeps(modulesDir, "app",
+                         json::array({ json{{"name", "lib"}, {"version", "^2.0.0"}} }));
+    writeManifest(modulesDir, "lib", "core", {}, "2.1.0");
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(modulesDir.string());
+
+    auto tree = pm.resolveDependencies("app");
+    ASSERT_TRUE(tree);
+    ASSERT_EQ(tree->children.size(), 1u);
+    EXPECT_EQ(tree->children[0].status, DependencyStatus::Installed);
+}
+
+TEST_F(DependencyResolutionTest, UnconstrainedDependencyIsNeverAMismatch) {
+    // Every package in the fleet is bare-name today, and whatever is installed
+    // satisfies "no range" — so the new status must be unreachable for them.
+    writeManifest(modulesDir, "app", "core", {"lib"});
+    writeManifest(modulesDir, "lib", "core", {}, "0.0.1");
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(modulesDir.string());
+
+    auto tree = pm.resolveDependencies("app");
+    ASSERT_TRUE(tree);
+    ASSERT_EQ(tree->children.size(), 1u);
+    EXPECT_EQ(tree->children[0].status, DependencyStatus::Installed);
+    EXPECT_FALSE(tree->children[0].requiredVersion.has_value());
+}
+
+TEST_F(DependencyResolutionTest, AbsenceOutranksVersionMismatch) {
+    // Absent + constrained reports absence: there is no version to judge it
+    // against. The range still rides along, so a caller knows which to install.
+    writeManifestRawDeps(modulesDir, "app",
+                         json::array({ json{{"name", "absent"}, {"version", "^2.0.0"}} }));
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(modulesDir.string());
+
+    auto tree = pm.resolveDependencies("app");
+    ASSERT_TRUE(tree);
+    ASSERT_EQ(tree->children.size(), 1u);
+    EXPECT_EQ(tree->children[0].status, DependencyStatus::NotInstalled);
+    ASSERT_TRUE(tree->children[0].requiredVersion.has_value());
+    EXPECT_EQ(*tree->children[0].requiredVersion, "^2.0.0");
+}
+
+TEST_F(DependencyResolutionTest, MismatchedNodeCarriesBothVersions) {
+    // "Needs ^2.0.0, have 1.4.2" takes both: the installed version comes from
+    // the node, the required range from the edge.
+    writeManifestRawDeps(modulesDir, "app",
+                         json::array({ json{{"name", "lib"}, {"version", "^2.0.0"}} }));
+    writeManifest(modulesDir, "lib", "core", {}, "1.4.2");
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(modulesDir.string());
+
+    auto tree = pm.resolveDependencies("app");
+    ASSERT_TRUE(tree);
+    ASSERT_EQ(tree->children.size(), 1u);
+    const auto& dep = tree->children[0];
+    EXPECT_EQ(dep.status, DependencyStatus::VersionMismatch);
+    EXPECT_EQ(dep.version, "1.4.2");
+    EXPECT_EQ(dep.installType, InstallType::Embedded);
+    ASSERT_TRUE(dep.requiredVersion.has_value());
+    EXPECT_EQ(*dep.requiredVersion, "^2.0.0");
+}
+
+TEST_F(DependencyResolutionTest, SignerIsEvaluatedWhenThePinIsPresent) {
+    // A `signer` pin asks WHICH `lib` this is — an identity question, so this
+    // walk answers it. Whether a publisher may be installed at all is
+    // authorization and stays with the trust-anchor gate in installPluginFile,
+    // which is why this walk consults no keyring. Nothing here records who
+    // published `lib`, hence signer_unknown; see UnknownSignerPolicy and
+    // test_observed_signer.cpp.
+    writeManifestRawDeps(modulesDir, "app",
+                         json::array({ json{{"name", "lib"},
+                                            {"signer", "did:jwk:eyJrdHkiOiJPS1AifQ"}} }));
+    writeManifest(modulesDir, "lib", "core", {}, "1.0.0");
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(modulesDir.string());
+
+    auto tree = pm.resolveDependencies("app");
+    ASSERT_TRUE(tree);
+    ASSERT_EQ(tree->children.size(), 1u);
+    const auto& dep = tree->children[0];
+    EXPECT_EQ(dep.status, DependencyStatus::SignerUnknown);
+    ASSERT_TRUE(dep.requiredSigner.has_value());
+    EXPECT_EQ(*dep.requiredSigner, "did:jwk:eyJrdHkiOiJPS1AifQ");
+    EXPECT_FALSE(dep.requiredVersion.has_value());
+    // An unknown publisher is not an absent package.
+    EXPECT_EQ(dep.version, "1.0.0");
+}
+
+TEST_F(DependencyResolutionTest, UnparseableRangeIsUnsatisfied) {
+    // Fail CLOSED: dropping a range we cannot parse turns a typo into a
+    // silently disabled check.
+    writeManifestRawDeps(modulesDir, "app",
+                         json::array({ json{{"name", "lib"}, {"version", "not-a-range"}} }));
+    writeManifest(modulesDir, "lib", "core", {}, "1.0.0");
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(modulesDir.string());
+
+    auto tree = pm.resolveDependencies("app");
+    ASSERT_TRUE(tree);
+    ASSERT_EQ(tree->children.size(), 1u);
+    EXPECT_EQ(tree->children[0].status, DependencyStatus::VersionMismatch);
+}
+
+TEST_F(DependencyResolutionTest, VersionMismatchIsFoundDeepInTheTree) {
+    // The constraint belongs to an EDGE, so it must survive recursion:
+    // a -> b -> c, only b constrains c.
+    writeManifest(modulesDir, "a", "core", {"b"});
+    writeManifestRawDeps(modulesDir, "b",
+                         json::array({ json{{"name", "c"}, {"version", ">=3.0.0"}} }));
+    writeManifest(modulesDir, "c", "core", {}, "2.9.9");
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(modulesDir.string());
+
+    auto tree = pm.resolveDependencies("a");
+    ASSERT_TRUE(tree);
+    EXPECT_EQ(tree->status, DependencyStatus::Installed);
+    ASSERT_EQ(tree->children.size(), 1u);
+    EXPECT_EQ(tree->children[0].status, DependencyStatus::Installed);
+    ASSERT_EQ(tree->children[0].children.size(), 1u);
+    const auto& c = tree->children[0].children[0];
+    EXPECT_EQ(c.name, "c");
+    EXPECT_EQ(c.status, DependencyStatus::VersionMismatch);
+}
+
+TEST_F(DependencyResolutionTest, VersionMismatchSurvivesFlatten) {
+    // flatten() is what the C ABI and every flat-list consumer read; a status
+    // that only exists on the tree would never reach them.
+    writeManifest(modulesDir, "a", "core", {"b"});
+    writeManifestRawDeps(modulesDir, "b",
+                         json::array({ json{{"name", "c"}, {"version", ">=3.0.0"}} }));
+    writeManifest(modulesDir, "c", "core", {}, "2.9.9");
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(modulesDir.string());
+
+    auto tree = pm.resolveDependencies("a");
+    ASSERT_TRUE(tree);
+    auto flat = tree->flatten();
+    auto it = std::find_if(flat.begin(), flat.end(),
+                           [](const DependencyTreeNode& n) { return n.name == "c"; });
+    ASSERT_NE(it, flat.end());
+    EXPECT_EQ(it->status, DependencyStatus::VersionMismatch);
+    ASSERT_TRUE(it->requiredVersion.has_value());
+    EXPECT_EQ(*it->requiredVersion, ">=3.0.0");
+}
+
+TEST_F(DependencyResolutionTest, DeeperMismatchIsNotMaskedByAShallowerBareEdge) {
+    // The DIAMOND: "lib" is named twice — by the root with no range, by
+    // "helper" with one it does not satisfy. flatten() dedupes by name
+    // FIRST-WINS and BFS reaches the depth-1 bare edge first, so the
+    // unsatisfied edge is the one at risk of vanishing from the flat list, the
+    // only projection resolveFlatDependencies and basecamp's load gate read.
+    writeManifest(modulesDir, "app", "core", {"lib", "helper"});
+    writeManifestRawDeps(modulesDir, "helper",
+                         json::array({ json{{"name", "lib"}, {"version", "^2.0.0"}} }));
+    writeManifest(modulesDir, "lib", "core", {}, "1.0.0");
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(modulesDir.string());
+
+    auto tree = pm.resolveDependencies("app");
+    ASSERT_TRUE(tree);
+
+    // The resolver itself is right — the mismatch IS on the tree.
+    ASSERT_EQ(tree->children.size(), 2u);
+    const auto& helper = tree->children[1];
+    ASSERT_EQ(helper.name, "helper");
+    ASSERT_EQ(helper.children.size(), 1u);
+    ASSERT_EQ(helper.children[0].status, DependencyStatus::VersionMismatch);
+
+    // One row per package still, but it must report the UNsatisfied edge: a
+    // package satisfies its dependants only if it satisfies all of them.
+    auto flat = tree->flatten();
+    EXPECT_EQ(flat.size(), 2u);
+    auto it = std::find_if(flat.begin(), flat.end(),
+                           [](const DependencyTreeNode& n) { return n.name == "lib"; });
+    ASSERT_NE(it, flat.end());
+    EXPECT_EQ(it->status, DependencyStatus::VersionMismatch);
+    ASSERT_TRUE(it->requiredVersion.has_value());
+    EXPECT_EQ(*it->requiredVersion, "^2.0.0");
+    // The installed version stays on the row: "requires ^2.0.0, found 1.0.0".
+    EXPECT_EQ(it->version, "1.0.0");
+}
+
+TEST_F(DependencyResolutionTest, DeeperMismatchSurvivesRegardlessOfDeclarationOrder) {
+    // Same graph, the root's two entries swapped: BFS visits by DEPTH, so
+    // declaration order must not decide whether the mismatch is reported.
+    writeManifest(modulesDir, "app", "core", {"helper", "lib"});
+    writeManifestRawDeps(modulesDir, "helper",
+                         json::array({ json{{"name", "lib"}, {"version", "^2.0.0"}} }));
+    writeManifest(modulesDir, "lib", "core", {}, "1.0.0");
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(modulesDir.string());
+
+    auto tree = pm.resolveDependencies("app");
+    ASSERT_TRUE(tree);
+    auto flat = tree->flatten();
+    auto it = std::find_if(flat.begin(), flat.end(),
+                           [](const DependencyTreeNode& n) { return n.name == "lib"; });
+    ASSERT_NE(it, flat.end());
+    EXPECT_EQ(it->status, DependencyStatus::VersionMismatch);
+}
+
+TEST_F(DependencyResolutionTest, ASatisfiedDiamondStaysInstalledAndDeduped) {
+    // Control against "any duplicate is a mismatch": both edges satisfied, so
+    // one row, still installed, reporting the first edge's constraint.
+    writeManifest(modulesDir, "app", "core", {"lib", "helper"});
+    writeManifestRawDeps(modulesDir, "helper",
+                         json::array({ json{{"name", "lib"}, {"version", "^1.0.0"}} }));
+    writeManifest(modulesDir, "lib", "core", {}, "1.0.0");
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(modulesDir.string());
+
+    auto tree = pm.resolveDependencies("app");
+    ASSERT_TRUE(tree);
+    auto flat = tree->flatten();
+    EXPECT_EQ(flat.size(), 2u);
+    auto it = std::find_if(flat.begin(), flat.end(),
+                           [](const DependencyTreeNode& n) { return n.name == "lib"; });
+    ASSERT_NE(it, flat.end());
+    EXPECT_EQ(it->status, DependencyStatus::Installed);
+    EXPECT_FALSE(it->requiredVersion.has_value());   // the depth-1 bare edge
+}
+
+TEST_F(DependencyResolutionTest, RootCarriesNoConstraint) {
+    // Nothing points AT the root, so it has no edge and no range to judge.
+    writeManifestRawDeps(modulesDir, "app",
+                         json::array({ json{{"name", "lib"}, {"version", "^2.0.0"}} }));
+    writeManifest(modulesDir, "lib", "core", {}, "1.0.0");
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(modulesDir.string());
+
+    auto tree = pm.resolveDependencies("app");
+    ASSERT_TRUE(tree);
+    EXPECT_EQ(tree->status, DependencyStatus::Installed);
+    EXPECT_FALSE(tree->requiredVersion.has_value());
+    EXPECT_FALSE(tree->requiredSigner.has_value());
+}
+
+// The `lgpm --json` wire format. The two new keys must be ADDITIVE: a
+// bare-name tree has to serialise exactly as it did before.
+
+TEST_F(DependencyResolutionTest, JsonOmitsConstraintKeysForBareNameDependencies) {
+    writeManifest(modulesDir, "app", "core", {"lib"});
+    writeManifest(modulesDir, "lib", "core", {}, "1.0.0");
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(modulesDir.string());
+
+    auto tree = pm.resolveDependencies("app");
+    ASSERT_TRUE(tree);
+    json j = *tree;
+    ASSERT_EQ(j["children"].size(), 1u);
+    const json& dep = j["children"][0];
+    EXPECT_EQ(dep["status"], "installed");
+    EXPECT_FALSE(dep.contains("requiredVersion"));
+    EXPECT_FALSE(dep.contains("requiredSigner"));
+}
+
+TEST_F(DependencyResolutionTest, JsonReportsMismatchWithBothVersions) {
+    writeManifestRawDeps(modulesDir, "app",
+                         json::array({ json{{"name", "lib"},
+                                            {"version", "^2.0.0"},
+                                            {"signer", "did:jwk:eyJrdHkiOiJPS1AifQ"}} }));
+    writeManifest(modulesDir, "lib", "core", {}, "1.0.0");
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(modulesDir.string());
+
+    auto tree = pm.resolveDependencies("app");
+    ASSERT_TRUE(tree);
+    json j = *tree;
+    ASSERT_EQ(j["children"].size(), 1u);
+    const json& dep = j["children"][0];
+    EXPECT_EQ(dep["status"], "version_mismatch");
+    // Installed, so it keeps the fields an installed node has — unlike
+    // not_installed and cycle, which blank them.
+    EXPECT_EQ(dep["version"], "1.0.0");
+    EXPECT_EQ(dep["installType"], "embedded");
+    EXPECT_EQ(dep["requiredVersion"], "^2.0.0");
+    EXPECT_EQ(dep["requiredSigner"], "did:jwk:eyJrdHkiOiJPS1AifQ");
 }

@@ -19,11 +19,50 @@ enum class InstallType {
     User,
 };
 
-// Whether a dependency is currently installed, absent, or part of a cycle.
+// Whether a dependency is installed, absent, part of a cycle, installed at a
+// version its dependant refused, or installed under a different publisher.
+//
+// APPEND new enumerators, never insert: this enum crosses a shared library
+// boundary (logos-package-manager-module compiles against this header and
+// links libpackage_manager_lib at run time), so existing values are ABI.
 enum class DependencyStatus {
     Installed,
     NotInstalled,
     Cycle,
+    // Installed, but the version does not satisfy the semver range this edge
+    // declared. Distinct from NotInstalled: different remedy, and only absence
+    // can be asserted without reading a constraint. `version` and
+    // `installType` are populated.
+    VersionMismatch,
+    // Installed under that name, and provably not the package the dependant
+    // named: the install's signature does not verify against the key in the
+    // edge's `signer` DID. An IDENTITY answer, not an authorization one —
+    // whether a publisher may be installed at all is the separate trust-anchor
+    // gate in installPluginFile. `version` and `installType` are populated.
+    SignerMismatch,
+    // The edge names a `signer`, a package by that name is installed, and
+    // nothing records who published it — absence of evidence, not a mismatch.
+    // Which way that falls is UnknownSignerPolicy. `version` and `installType`
+    // are populated.
+    SignerUnknown,
+};
+
+// What resolveDependencies reports for a `signer`-pinned edge when the
+// installed package records no publisher at all: embedded packages never pass
+// through installPluginFile and so can never acquire the `signer` sidecar, and
+// neither can installs predating it or made under SignaturePolicy::NONE.
+//
+// Default Lenient (flip with setUnknownSignerPolicy), because under Strict a
+// pin on an embedded dependency is unsatisfiable by construction, forever,
+// with nothing the user can do. Residual: an unsigned impostor under a pinned
+// name also records nothing, so it reports SignerUnknown and does not block —
+// bounded by SignaturePolicy::REQUIRE, which refuses unsigned installs.
+enum class UnknownSignerPolicy {
+    // No record -> SignerUnknown. Surfaced; claims no mismatch it cannot prove.
+    Lenient,
+    // No record -> SignerMismatch. Fail closed: only a signature verified
+    // against the pinned key satisfies the pin.
+    Strict,
 };
 
 struct SignatureVerificationResult {
@@ -122,6 +161,17 @@ struct InstalledPackage {
     // the semantic evaluation of these constraints belongs to the resolver in
     // logos-package-downloader and, at load time, to the runtime.
     std::vector<PackageDependency> dependencyConstraints;
+    // The DID from the installed `manifest.sig`, set only once that signature
+    // verified against the key the DID itself carries — self-consistent, so it
+    // proves nothing about identity: whoever replaces manifest.sig replaces the
+    // DID beside it and this reports THEIRS. Use it for DISPLAY; never compare
+    // it to a pin — resolveDependencies and the trust-anchor gate supply an
+    // outside key instead.
+    //
+    // nullopt = no usable signature installed: no manifest.sig (every embedded
+    // and every unsigned package) or one that does not verify even under its
+    // own DID. It never means "unsigned".
+    std::optional<std::string> signerDid;
     Hashes hashes;
     InstallType installType;
     std::string installDir;
@@ -134,14 +184,38 @@ struct InstalledPackage {
 struct DependencyTreeNode {
     std::string name;
     DependencyStatus status;
-    std::string version;                    // empty unless status == Installed
-    InstallType installType;                // meaningful only if status == Installed
+    // Both populated whenever nodeResolvedToAnInstalledPackage(status); empty
+    // and unspecified for NotInstalled and Cycle.
+    std::string version;
+    InstallType installType;
+    // The constraint the PARENT declared on this edge, verbatim; absent when
+    // the parent named the dependency without one, and always absent on the
+    // root, which no edge points at. Both are judged — `requiredVersion`
+    // against `version`, `requiredSigner` by verifying the installed signature
+    // against the pinned key (never by comparing DID strings) — and `status`
+    // reports whichever failed.
+    std::optional<std::string> requiredVersion;
+    std::optional<std::string> requiredSigner;
+    // What the installed package's signature says about itself — see
+    // InstalledPackage::signerDid. Present on any node that resolved to an
+    // installed package carrying a usable signature. Sits next to
+    // `requiredSigner` so a report can name both sides ("requires <pin>,
+    // signed by <did>"); `status` is NOT derived by comparing the two.
+    std::optional<std::string> signerDid;
     std::vector<DependencyTreeNode> children;
 
     // BFS enumeration of descendants (this node is excluded), deduplicated
     // by name so diamonds and cycles don't produce repeats. The `children`
     // vectors on returned copies are left empty — consumers iterate the
     // flat output without double-counting.
+    //
+    // The dedup interacts with the per-edge constraint fields: two parents may
+    // depend on the same package under different constraints, and the flat list
+    // keeps the edge BFS reached first — EXCEPT that a later edge judging the
+    // package MORE HARSHLY promotes the row and carries its own constraint,
+    // since a package satisfies its dependants only if it satisfies all of
+    // them. The row still reports one failing constraint, not all; callers that
+    // need every constraint walk the tree instead of flattening it.
     std::vector<DependencyTreeNode> flatten() const;
 };
 
@@ -164,6 +238,13 @@ struct DependentTreeNode {
 
 const char* installTypeToString(InstallType t);
 const char* dependencyStatusToString(DependencyStatus s);
+
+// Did this node resolve to a package that is actually ON DISK? True for every
+// status except NotInstalled and Cycle, and so decides whether `version` /
+// `installType` carry meaning. A predicate rather than an `||` chain at each
+// site: an appended installed-but-rejected status would otherwise silently
+// start reporting an empty version at call sites in other repositories.
+bool nodeResolvedToAnInstalledPackage(DependencyStatus s);
 
 class PackageManagerLib
 {
@@ -298,6 +379,11 @@ public:
     void setKeyringDirectory(const std::string& dir);
     std::string keyringDirectory() const { return m_keyringDir; }
 
+    // What resolveDependencies reports for a signer-pinned edge whose
+    // installed package records no publisher. Default Lenient.
+    void setUnknownSignerPolicy(UnknownSignerPolicy policy);
+    UnknownSignerPolicy unknownSignerPolicy() const { return m_unknownSignerPolicy; }
+
     // Standalone signature verification
     SignatureVerificationResult verifyPackageSignature(const std::string& lgxPath);
 
@@ -319,5 +405,7 @@ private:
     std::vector<std::string> m_embeddedUiPluginsDirs;
     std::string m_userUiPluginsDir;
     SignaturePolicy m_signaturePolicy = SignaturePolicy::WARN;
+    // Build-wide default; see UnknownSignerPolicy.
+    UnknownSignerPolicy m_unknownSignerPolicy = UnknownSignerPolicy::Lenient;
     std::string m_keyringDir;
 };

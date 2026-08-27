@@ -285,6 +285,14 @@ static int cmdInfo(PackageManagerLib& pm, const std::string& packageName, bool j
         std::cout << "Category: " << found.category << "\n";
         std::cout << "Author: " << found.author << "\n";
         std::cout << "Directory: " << found.installDir << "\n";
+        // signerDid is set only after the installed signature verified against
+        // the key its own DID carries, so the value itself is checked. WHICH
+        // identity that is stays self-asserted until an outside reference (a
+        // dependant's pin, the keyring) settles it — hence the label.
+        std::cout << "Signer: "
+                  << (found.signerDid ? *found.signerDid + " (self-asserted)"
+                                      : std::string("(no signature installed)"))
+                  << "\n";
 
         if (!found.dependencies.empty()) {
             // Render the declared constraint alongside the name when the

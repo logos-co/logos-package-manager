@@ -8,6 +8,7 @@ add_executable(lgpm_tests
     test_signature.cpp
     test_installed_path.cpp
     test_dependency_resolution.cpp
+    test_signer_identity.cpp
     test_uninstall.cpp
     test_path_traversal.cpp
 )

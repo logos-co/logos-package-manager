@@ -42,6 +42,11 @@ void to_json(nlohmann::json& j, const InstalledPackage& p)
     // or a signer DID, so today's manifests serialise byte-identically.
     if (!p.dependencyConstraints.empty())
         j["dependencyConstraints"] = p.dependencyConstraints;
+    // Omitted, not empty-valued, when no usable signature is installed: an
+    // absent key is how a reader tells unsigned from signed, which an empty
+    // string would not. See InstalledPackage::signerDid.
+    if (p.signerDid)
+        j["signerDid"] = *p.signerDid;
     j["hashes"]       = p.hashes;
     j["installType"]  = installTypeToString(p.installType);
     j["installDir"]   = p.installDir;
@@ -55,14 +60,23 @@ void to_json(nlohmann::json& j, const DependencyTreeNode& n)
     j["status"]   = dependencyStatusToString(n.status);
     // For Cycle and NotInstalled nodes, installType has no meaningful value;
     // emit the empty string to match the legacy wire format produced when
-    // the lib returned JSON directly.
-    if (n.status == DependencyStatus::Installed) {
+    // the lib returned JSON directly. VersionMismatch resolved to a real
+    // installed package, so it keeps both.
+    if (nodeResolvedToAnInstalledPackage(n.status)) {
         j["version"]     = n.version;
         j["installType"] = installTypeToString(n.installType);
     } else {
         j["version"]     = "";
         j["installType"] = "";
     }
+    // Additive: absent unless the parent edge declared one.
+    if (n.requiredVersion) j["requiredVersion"] = *n.requiredVersion;
+    if (n.requiredSigner)  j["requiredSigner"]  = *n.requiredSigner;
+    // Who the installed package's own signature says signed it; absent when
+    // none is installed. NOT what `status` was derived from — that verdict
+    // comes from verifying against `requiredSigner`'s key — so the two can
+    // differ without the row being inconsistent.
+    if (n.signerDid)  j["signerDid"]  = *n.signerDid;
     j["children"] = n.children;
 }
 
