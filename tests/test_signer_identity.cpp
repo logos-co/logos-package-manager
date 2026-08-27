@@ -828,6 +828,31 @@ TEST_F(SignerIdentityTest, StatusStringsAreStableAndDistinct) {
     EXPECT_EQ(static_cast<int>(DependencyStatus::SignerUnknown),   5);
 }
 
+// The installed manifest.json must be the SIGNED BYTES, byte for byte.
+//
+// Package::signPackage signs getManifest().toJson(); lgx_get_manifest_json()
+// returns that same expression; installPluginFile writes it to disk. So what
+// lands on disk has to be those bytes or nothing can ever verify — and the
+// resolve path reads them with readFileBytes(), which is BINARY.
+//
+// HONEST LIMIT, because a green run here is easy to over-read: on Linux this
+// cannot fail even with a text-mode stream, since there is no translation to
+// do. It guards the platform it names. On Windows a text-mode write turns
+// '\n' into "\r\n" while the read stays binary, so the translation is NOT
+// cancelled, every check returns MISMATCH, and it does so for packages the
+// pinned key genuinely signed — a silent, Windows-only, wrong-cause failure.
+TEST_F(SignerIdentityTest, TheInstalledManifestCarriesNoTextModeTranslation) {
+    ASSERT_FALSE(generateKey("mine").empty());
+    ASSERT_FALSE(installSigned("dep", "mine").empty());
+
+    const std::string installed = slurp(installedDirOf("dep") / "manifest.json");
+    ASSERT_FALSE(installed.empty()) << "no installed manifest.json to inspect";
+    EXPECT_EQ(installed.find('\r'), std::string::npos)
+        << "the installed manifest.json contains a carriage return, so it was "
+           "written through a text-mode stream; on Windows its bytes then "
+           "differ from the signed message and no signature can verify";
+}
+
 TEST_F(SignerIdentityTest, EverySignerStatusCountsAsOnDisk) {
     EXPECT_TRUE(nodeResolvedToAnInstalledPackage(DependencyStatus::Installed));
     EXPECT_TRUE(nodeResolvedToAnInstalledPackage(DependencyStatus::VersionMismatch));

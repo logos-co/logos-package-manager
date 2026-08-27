@@ -1672,7 +1672,15 @@ bool PackageManagerLib::extractLgxPackage(const std::string& lgxPath, const std:
     }
 
     {
-        std::ofstream mf(manifestPath);
+        // BINARY, and it is load-bearing: these bytes are the signed message.
+        // Package::signPackage signs getManifest().toJson(), which is what
+        // lgx_get_manifest_json() returns, so the file on disk has to be those
+        // bytes exactly. A text-mode stream translates '\n' to "\r\n" on
+        // Windows, and readFileBytes() below reads BINARY — so the translation
+        // is not cancelled on the way back and the signature can never verify.
+        // The failure is silent (SignerMismatch on a package the pinned key
+        // really did sign) and Windows-only, which is the worst combination.
+        std::ofstream mf(manifestPath, std::ios::binary);
         if (!mf.is_open()) {
             errorMsg = "Failed to write manifest.json to: " + manifestPath.string();
             lgx_free_package(pkg);
