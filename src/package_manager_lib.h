@@ -219,41 +219,29 @@ struct InstalledPackage {
     // the semantic evaluation of these constraints belongs to the resolver in
     // logos-package-downloader and, at load time, to the runtime.
     std::vector<PackageDependency> dependencyConstraints;
-    // WHO PUBLISHED THIS COPY — the DID of the key whose signature over this
-    // package's manifest was actually VERIFIED when it was installed. Read
-    // back from the `signer` sidecar installPluginFile writes next to
-    // `variant`; see readInstalledSigner in the .cpp for the write/read pair.
+    // WHO SIGNED THIS COPY — the DID named by the installed `manifest.sig`,
+    // reported only once that signature has been checked against the key that
+    // DID itself carries. So it means: somebody holding this key produced a
+    // real Ed25519 signature over the manifest.json sitting next to it.
     //
-    // Three states, and they are three, not two:
-    //   nullopt        nothing recorded — UNKNOWN. Embedded packages (never
-    //                  installed through installPluginFile), installs
-    //                  predating the sidecar, installs under
-    //                  SignaturePolicy::NONE, and unsigned packages all land
-    //                  here. NOT "unsigned": the value is missing, which is a
-    //                  different fact from a package we looked at and found
-    //                  unsigned.
-    //   non-empty DID  an OBSERVATION. Only written when
-    //                  signature_valid && !signer_did.empty(); a package whose
-    //                  manifest.sig names a DID but does NOT verify records
-    //                  nothing, because signer_did alone is a CLAIM (it is
-    //                  populated before verification in
-    //                  logos-package's Package::verifySignature).
-    //   empty string   never produced; the reader collapses it to nullopt so a
-    //                  truncated sidecar cannot read as an identity.
+    // It does NOT mean the package is who it says it is. A did:jwk embeds its
+    // own public key, so an attacker who replaces manifest.sig replaces the
+    // DID beside it, signs with a key they own, and this field reports THEIR
+    // DID, self-consistently. That is not a weakness to defend against; it is
+    // simply the limit of what one file can say about itself. Deciding WHICH
+    // identity is correct needs an outside reference — a dependant's `signer`
+    // pin (resolveDependencies) or the local keyring (the trust-anchor gate),
+    // and both of those supply the key themselves rather than reading it here.
     //
-    // Distinct from every `signer` in `dependencyConstraints`, which are PINS
-    // this package declares about OTHERS. This is the one field that says
-    // something about THIS package, and it is the only one a pin can be
-    // checked against.
+    // Use it for DISPLAY. Never compare it to a pin: see the pin block in
+    // resolveDependencies for why that comparison is unsound.
     //
-    // Which is why the sidecar behind it is written AUTHORITATIVELY: install
-    // rewrites it on an observation and DELETES it when it has none, in the
-    // install directory, after the copy. Without both halves the value is not
-    // evidence at all — `variants/<v>/` is copied wholesale, so a package can
-    // ship a file by that name, and copyDirectoryContents merges rather than
-    // replaces, so a previous install's record would outlive the package it
-    // described. Either one lets a package wear an identity nobody verified.
-    std::optional<std::string> observedSigner;
+    // nullopt means no usable signature is installed — no manifest.sig at all
+    // (every embedded package, since none passes through installPluginFile,
+    // and every unsigned one), or one that does not verify even under its own
+    // DID (a leftover from a previous install, a planted file, a corrupted
+    // one). It never means "unsigned": absence of evidence is not a finding.
+    std::optional<std::string> signerDid;
     Hashes hashes;
     InstallType installType;
     std::string installDir;
@@ -273,7 +261,7 @@ struct DependencyTreeNode {
     // The constraint the PARENT declared on this edge, verbatim, absent when
     // the parent named the dependency without one (and always absent on the
     // root, which no edge points at). BOTH are judged: `requiredVersion`
-    // against `version`, `requiredSigner` against `observedSigner`, and
+    // against `version`, `requiredSigner` by VERIFYING the installed
     // `status` reports whichever failed.
     //
     // `requiredSigner` used to be carried as data only, on the grounds that
@@ -290,15 +278,16 @@ struct DependencyTreeNode {
     // belongs elsewhere conflated the two and did neither.
     std::optional<std::string> requiredVersion;
     std::optional<std::string> requiredSigner;
-    // Who actually published what is installed under this name — see
-    // InstalledPackage::observedSigner. Populated on any node that resolved to
-    // an installed package (whatever its status), absent on NotInstalled and
-    // Cycle nodes, and absent when nothing recorded a publisher.
+    // What the installed package's own signature says about itself — see
+    // InstalledPackage::signerDid. Populated on any node that resolved to an
+    // installed package (whatever its status), absent on NotInstalled and
+    // Cycle nodes, and absent when no usable signature is installed.
     //
     // Travels next to `requiredSigner` so a report can name BOTH sides:
-    // "requires <pin>, published by <observed>" is actionable, and either half
-    // alone is not.
-    std::optional<std::string> observedSigner;
+    // "requires <pin>, signed by <did>" is actionable, and either half alone
+    // is not. `status` is NOT derived by comparing the two — it comes from
+    // verifying the installed signature against the PIN's key.
+    std::optional<std::string> signerDid;
     std::vector<DependencyTreeNode> children;
 
     // BFS enumeration of descendants (this node is excluded), deduplicated
@@ -493,59 +482,6 @@ public:
 
     // Standalone signature verification
     SignatureVerificationResult verifyPackageSignature(const std::string& lgxPath);
-
-    // WHAT COUNTS AS AN OBSERVATION of a package's publisher.
-    //
-    // The rule, and the whole rule: a DID is recorded only when the Ed25519
-    // signature over the manifest actually VERIFIED. `signature_valid`, never
-    // `is_signed`, and never `signer_did` on its own — logos-package populates
-    // signer_did straight out of manifest.sig BEFORE running the check
-    // (Package::verifySignature), so until the check passes it is a CLAIM the
-    // package makes about itself, and anybody can write any DID into a
-    // manifest.sig. Recording a claim would let a forged signature mint that
-    // publisher identity for the install, and every pin comparison downstream
-    // would then be comparing against attacker-chosen input. That is exactly
-    // the defect fixed alongside this in logos-package-downloader's
-    // index→file signer binding, which read is_signed and signer_did and
-    // never signature_valid.
-    //
-    // Returns nullopt for: unsigned, signature failed, DID empty. All three
-    // read back as "nothing recorded" — the honest answer in every case is
-    // that we do not know who published it.
-    //
-    // A pure function of the verification result, and PUBLIC, for the reason
-    // signerPinMatches is public in logos-package-downloader: it is the
-    // invariant itself rather than one call site's spelling of it. Today the
-    // trust-anchor gate happens to refuse a failed-signature package before
-    // this is ever consulted with one, so the two spellings cannot be told
-    // apart end to end — which is precisely why the rule needs to be testable
-    // on its own. WARN means "warn, do not refuse"; the day it stops refusing
-    // this case, a claim-based rule would start minting identities silently.
-    static std::optional<std::string> observedSignerFrom(
-        const SignatureVerificationResult& result);
-
-    // The name of the sidecar file, inside an installed package directory,
-    // that records the DID of the key whose signature was verified when the
-    // package was installed. Exactly the shape of the `variant` sidecar next
-    // to it: one line, no payload meaning, written by install, read by scan.
-    //
-    // Exposed so tests and tooling can assert on the file without hardcoding
-    // the name in two places.
-    //
-    // The name is RESERVED: install overwrites or deletes it after the payload
-    // has been copied, so whatever a package ships under it is discarded. A
-    // package that could write here could name its own publisher.
-    static const char* observedSignerFileName();
-
-    // Read that sidecar out of an installed package directory.
-    //
-    // nullopt means UNKNOWN — the file is absent (embedded install, an install
-    // predating the sidecar, an install under SignaturePolicy::NONE) or holds
-    // nothing usable. It never means "unsigned": a package we verified and
-    // found unsigned records nothing, exactly like one we never looked at, and
-    // this reader deliberately does not invent a distinction the file cannot
-    // carry. Callers MUST treat nullopt as an absence of evidence.
-    static std::optional<std::string> readInstalledSigner(const std::string& moduleDir);
 
     // Utilities
     static bool versionGreaterOrEqual(const std::string& a, const std::string& b);

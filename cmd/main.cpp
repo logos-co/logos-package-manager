@@ -285,14 +285,15 @@ static int cmdInfo(PackageManagerLib& pm, const std::string& packageName, bool j
         std::cout << "Category: " << found.category << "\n";
         std::cout << "Author: " << found.author << "\n";
         std::cout << "Directory: " << found.installDir << "\n";
-        // WHO PUBLISHED THIS COPY. Only ever a DID whose signature over this
-        // package verified at install time; anything else prints as unknown,
-        // never as "unsigned" — nothing on disk records that distinction, and
-        // claiming it would be the same claim-vs-observation confusion the
-        // sidecar exists to avoid.
+        // WHO SIGNED THIS COPY, according to the signature installed beside
+        // it — printed only once that signature has been checked against the
+        // key its own DID carries, so this is never a bare unchecked claim.
+        // It is still SELF-asserted as to which identity: settling that needs
+        // an outside reference (a dependant's pin, or the keyring), so the
+        // label says so rather than implying more than was established.
         std::cout << "Signer: "
-                  << (found.observedSigner ? *found.observedSigner
-                                           : std::string("(not recorded)"))
+                  << (found.signerDid ? *found.signerDid + " (self-asserted)"
+                                      : std::string("(no signature installed)"))
                   << "\n";
 
         if (!found.dependencies.empty()) {

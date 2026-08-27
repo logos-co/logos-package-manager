@@ -314,17 +314,15 @@ std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, 
     // set by resolveDependencies in this file. It never reaches this function.
     // Both checks are needed; neither substitutes for the other.
     //
-    // This block is also where the OBSERVED signer is established, which is
-    // the only place it can be: the .lgx is deleted after extraction and never
-    // retained, so this verification is the one and only moment in a package's
-    // life at which anybody knows who signed it. What survives is the sidecar
-    // written once the copy has landed.
-    std::optional<std::string> observedSigner;
+    // This block decides ONLY whether the install may proceed. It used to also
+    // establish the installed package's publisher identity, on the reasoning
+    // that the .lgx is deleted after extraction so this is the last moment
+    // anybody knows who signed it. That reasoning was wrong in its premise:
+    // the signature is a FILE, and extractLgxPackage now carries it into the
+    // install tree beside the bytes it covers, so the question can be asked
+    // again at any time by anyone, against a key of their own choosing.
     if (m_signaturePolicy != SignaturePolicy::NONE) {
         auto sigResult = verifyPackageSignature(pluginPath);
-        // WHAT COUNTS AS AN OBSERVATION — the rule lives in
-        // observedSignerFrom(), not inline here. See that function.
-        observedSigner = observedSignerFrom(sigResult);
 
         if (sigResult.is_signed && !sigResult.signature_valid) {
             errorMsg = "Invalid signature: " + (sigResult.error.empty() ? "unknown error" : sigResult.error);
@@ -464,84 +462,6 @@ std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, 
         return {};
     }
 
-    // ── Record who published what is now on disk ───────────────────────────
-    //
-    // The mechanism is the one extractLgxPackage already uses for `variant`: a
-    // single-line, non-payload sidecar in <installRoot>/<name>/, read back at
-    // scan time by readInstalledSigner, the mirror of readInstalledVariant.
-    // Written HERE rather than inside extractLgxPackage because only
-    // installPluginFile ever verifies a signature — extractLgxPackage unpacks
-    // without any keyring, and giving it a signer parameter it could not fill
-    // would invite a caller to pass a CLAIMED did.
-    //
-    // TOTAL, and AFTER the copy, and both of those are load-bearing.
-    //
-    // A sidecar that says who published a package is EVIDENCE, and evidence
-    // only means anything if the verifier is the only thing that can write it
-    // and it always describes the bytes sitting there now. Two ways that fails
-    // if this is a bare "write it when we have one" in the extracted tree:
-    //
-    //   1. THE PACKAGE PLANTS IT. `variants/<v>/` is copied wholesale into the
-    //      install directory, so a package author picks filenames that land
-    //      there. An unsigned package shipping a file called `signer` holding
-    //      somebody else's DID would be reported as published by them — no
-    //      key, no signature, no keyring, pin satisfied by naming the answer.
-    //   2. THE PREVIOUS INSTALL'S RECORD OUTLIVES IT. copyDirectoryContents
-    //      MERGES into an existing directory rather than replacing it, so a
-    //      second install that verifies nothing leaves the FIRST install's
-    //      sidecar standing and an impostor inherits the identity of whatever
-    //      it replaced.
-    //
-    // Writing on an observation and REMOVING when there is none, in the
-    // install directory once the copy has landed, closes both: whatever the
-    // package shipped and whatever the last install left are overwritten or
-    // deleted, and what remains is this install's own finding. Absent file =
-    // nothing was verified, which is a different fact from "unsigned" — and
-    // nothing on disk claims to record that one.
-    //
-    // The read-only dance is the same trap clearReadOnlyRecursive exists for,
-    // and it bites here in BOTH directions. A payload file arrives with the
-    // package's own permissions and everything in the Nix store is 0444, so a
-    // package can ship its planted `signer` read-only. POSIX consults the
-    // parent directory to delete, so the remove below succeeds there and the
-    // fresh write lands; Windows refuses to delete a FILE_ATTRIBUTE_READONLY
-    // file AND refuses to reopen it for write, which would leave the planted
-    // value standing on exactly one platform. Clearing the bit first makes the
-    // two agree. Truncation is the last resort rather than a second delete:
-    // readInstalledSigner collapses an empty file to "nothing recorded", so
-    // emptying a file we cannot unlink still erases the CLAIM.
-    {
-        const fs::path signerFile = fs::path(installDir) / installedModuleName /
-                                    PackageManagerLib::observedSignerFileName();
-        std::error_code sigEc;
-        if (fs::exists(signerFile, sigEc)) {
-            sigEc.clear();
-            fs::permissions(signerFile, fs::perms::owner_write,
-                            fs::perm_options::add, sigEc);
-        }
-        sigEc.clear();
-        fs::remove(signerFile, sigEc);
-
-        if (observedSigner) {
-            std::ofstream sf(signerFile, std::ios::out | std::ios::trunc);
-            if (sf.is_open()) {
-                sf << *observedSigner;
-            } else {
-                std::cerr << "Warning: could not record the observed signer for "
-                          << installedModuleName << "; it will read as unknown."
-                          << std::endl;
-            }
-        } else if (fs::exists(signerFile, sigEc)) {
-            std::ofstream sf(signerFile, std::ios::out | std::ios::trunc);
-            if (!sf.is_open()) {
-                std::cerr << "Warning: could not clear a stale observed-signer record for "
-                          << installedModuleName << " at " << signerFile.string()
-                          << "; it may name a publisher that did not sign this package."
-                          << std::endl;
-            }
-        }
-    }
-
     // Determine the path we report for what was just installed. This is the
     // main file when the package ships one and the module directory otherwise;
     // it is never empty here, because copyLibraryFromExtracted() has just
@@ -645,9 +565,20 @@ struct ScanEntry {
     // PackageDependency). The graph walks `.name`; the constraints ride along
     // for consumers that evaluate them.
     std::vector<PackageDependency> dependencies;
-    // The publisher DID recorded by install for THIS package — see
-    // InstalledPackage::observedSigner. nullopt = nothing recorded = unknown.
-    std::optional<std::string> observedSigner;
+    // The DID the installed manifest.sig names, once that signature has been
+    // checked against the key the DID itself carries — see
+    // InstalledPackage::signerDid. For display. nullopt = no usable signature.
+    std::optional<std::string> signerDid;
+    // The raw material a signer PIN is judged against, kept verbatim because
+    // that is the only form in which it means anything.
+    //
+    // manifestBytes is the file as it sits on disk, byte for byte — NOT
+    // scan.manifest re-serialised. An Ed25519 signature covers exact bytes,
+    // and nlohmann round-tripping is not byte-preserving (key order, spacing,
+    // number formatting), so a re-dump would fail to verify a perfectly good
+    // signature and every pin in the fleet would read as a mismatch.
+    std::string manifestBytes;
+    std::optional<std::string> manifestSigJson;   // nullopt = no manifest.sig
     json manifest;  // full manifest.json — used to emit the JSON passthrough
 };
 
@@ -681,10 +612,66 @@ static std::string resolveMainFilePath(const json& manifest,
     return {};
 }
 
+// Read a whole file as bytes. nullopt when it is not there or cannot be read;
+// an EMPTY file reads as an empty string, which is a different answer and the
+// callers below rely on the distinction.
+static std::optional<std::string> readFileBytes(const fs::path& path)
+{
+    std::ifstream f(path, std::ios::binary);
+    if (!f.is_open())
+        return std::nullopt;
+    std::ostringstream buf;
+    buf << f.rdbuf();
+    if (f.bad())
+        return std::nullopt;
+    return buf.str();
+}
+
+// The DID an installed signature names, reported only if that signature really
+// verifies under the key that DID carries.
+//
+// This is a SELF-check and it is labelled one on purpose. did:jwk embeds its
+// own public key, so the document supplies both the claim and the means to
+// check it, and the two agree whenever a single author wrote both. What it
+// therefore proves is narrow but real: somebody holding SOME key produced a
+// genuine Ed25519 signature over exactly these manifest bytes. That is enough
+// to print, and it is not plantable — a package cannot ship this without a
+// private key, which is the property the old sidecar had to be defended into
+// having.
+//
+// What it CANNOT do is settle identity, and no amount of care here would make
+// it able to. Comparing this value to a pin would compare the pin against a
+// string the package chose, checked against a key the package also chose. See
+// resolveDependencies.
+static std::optional<std::string> selfAssertedSignerDid(
+    const std::string& manifestBytes,
+    const std::optional<std::string>& manifestSigJson)
+{
+    if (!manifestSigJson)
+        return std::nullopt;
+
+    std::string did;
+    try {
+        json sig = json::parse(*manifestSigJson);
+        if (!sig.is_object() || !sig.contains("did") || !sig["did"].is_string())
+            return std::nullopt;
+        did = sig["did"].get<std::string>();
+    } catch (...) {
+        return std::nullopt;
+    }
+    if (did.empty())
+        return std::nullopt;
+
+    if (lgx_check_manifest_signature(manifestBytes.data(), manifestBytes.size(),
+                                     manifestSigJson->c_str(), did.c_str())
+        != LGX_SIG_CHECK_OK) {
+        return std::nullopt;
+    }
+    return did;
+}
+
 // Read one line out of a sidecar file inside an installed package directory,
-// trimmed. Shared by the `variant` and `signer` sidecars, which are the same
-// shape: one line, no payload meaning, written by install, read by scan.
-// Returns empty when the file is absent or holds nothing.
+// trimmed. Returns empty when the file is absent or holds nothing.
 static std::string readSidecarLine(const fs::path& moduleDir, const char* fileName)
 {
     std::ifstream f(moduleDir / fileName);
@@ -736,13 +723,17 @@ static std::map<std::string, ScanEntry> enumerateManifests(
                 continue;
 
             fs::path manifestPath = entry.path() / "manifest.json";
-            std::ifstream manifestFile(manifestPath);
-            if (!manifestFile.is_open())
+            // Slurped rather than streamed into the parser because the RAW
+            // bytes are load-bearing here: they are the signed message. Parsing
+            // from the string leaves both views available and costs one copy of
+            // a file we were reading anyway.
+            std::optional<std::string> manifestBytes = readFileBytes(manifestPath);
+            if (!manifestBytes)
                 continue;
 
             json manifest;
             try {
-                manifest = json::parse(manifestFile);
+                manifest = json::parse(*manifestBytes);
             } catch (...) {
                 continue;
             }
@@ -772,13 +763,20 @@ static std::map<std::string, ScanEntry> enumerateManifests(
             scan.installDir = entry.path().string();
             scan.installType = installType;
             scan.mainFilePath = resolveMainFilePath(manifest, entry.path(), variants);
-            // Who published this copy, as OBSERVED at install time. Read from
-            // the same directory and by the same mechanism as `variant`
-            // above; nullopt whenever nothing was recorded, which is every
-            // embedded package (they never pass through installPluginFile) and
-            // every install predating the sidecar.
-            scan.observedSigner =
-                PackageManagerLib::readInstalledSigner(entry.path().string());
+            // The package's own signature over the manifest just read, if it
+            // shipped one. Both halves are kept verbatim: the pin check needs
+            // the exact bytes and the exact signature, and neither survives a
+            // round trip through a parser.
+            scan.manifestBytes   = std::move(*manifestBytes);
+            scan.manifestSigJson = readFileBytes(entry.path() / "manifest.sig");
+            // The display value, and the ONLY thing that is decided here.
+            // Checking the signature against the key its own DID carries proves
+            // a real key signed these exact bytes — enough to say "signed by
+            // <did>" honestly, and deliberately not enough to say the package
+            // is who it claims. WHICH identity is right is a question only an
+            // outside reference can answer, and the pin block in
+            // resolveDependencies answers it there, with the pin's own key.
+            scan.signerDid = selfAssertedSignerDid(scan.manifestBytes, scan.manifestSigJson);
 
             // Surface the variant-mismatch silent-drop (logos-basecamp#191): a
             // module installed for a variant this build does not accept is
@@ -881,7 +879,7 @@ static InstalledPackage scanToInstalledPackage(const ScanEntry& scan)
     p.installType = scan.installType;
     p.installDir  = scan.installDir;
     p.mainFilePath = scan.mainFilePath;
-    p.observedSigner = scan.observedSigner;
+    p.signerDid = scan.signerDid;
     // Split the scanned entries into the name list every consumer already
     // reads and the constrained subset. Built here, in one place, so the two
     // views cannot drift.
@@ -1015,7 +1013,7 @@ std::optional<DependencyTreeNode> PackageManagerLib::resolveDependencies(const s
         const auto& scan = it->second;
         node.version        = scan.version;
         node.installType    = scan.installType;
-        node.observedSigner = scan.observedSigner;
+        node.signerDid      = scan.signerDid;
         // An absent range means the parent declared no constraint and anything
         // installed satisfies it. A range that does not PARSE is treated as
         // unsatisfied rather than ignored: silently dropping a typo'd range
@@ -1033,11 +1031,38 @@ std::optional<DependencyTreeNode> PackageManagerLib::resolveDependencies(const s
         // resolving byte-identically to before — which is every edge in the
         // fleet today.
         //
-        // Compared against what was OBSERVED (a signature this build verified
-        // at install time), never against what a package CLAIMS: signer_did is
-        // populated by logos-package before the Ed25519 check, so a forged
-        // manifest.sig naming the pinned DID would satisfy a claim-based
-        // comparison while satisfying nothing real.
+        // THE PIN SUPPLIES THE KEY. This is the whole mechanism, and it is the
+        // one thing here that is fatal to get backwards, so it is spelled out:
+        //
+        //   1. take the PINNED did and extract its Ed25519 public key
+        //      (did:jwk embeds it, so no keyring is involved and none is
+        //      needed — the keyring answers a different question, whether a
+        //      key is ANCHORED, and it is asked at install time)
+        //   2. verify the installed manifest.sig over the installed
+        //      manifest.json bytes WITH THAT KEY
+        //   3. verifies => the pinned key signed this package => same package
+        //      fails    => it did not                         => SignerMismatch
+        //
+        // The DID written inside the installed manifest.sig is NOT consulted.
+        // Reading it, comparing it to the pin, and then verifying with that
+        // same DID's key would prove only that the file agrees with itself,
+        // which any attacker can arrange: swap the signature and swap the DID
+        // beside it, sign with a key you own, and every check passes. Making
+        // the key come from the pin means forging a match requires an Ed25519
+        // signature under a key the attacker does not have.
+        //
+        // What this replaced was a `signer` sidecar the installer wrote,
+        // recording the DID it had verified — an ASSERTION, trusted because
+        // the installer made it. Three separate forgeries worked against it
+        // (a package shipping its own record, since variants/<v>/ is copied
+        // wholesale; a record outliving its package, since the copy merges;
+        // and a read-only plant that Windows would not let the installer
+        // clear), and each needed its own defence. None of them survives here,
+        // and not because anything defends against them: a planted, inherited
+        // or unclearable manifest.sig is simply a file that does not verify
+        // under the pinned key. The signature also binds the PAYLOAD, not just
+        // the name — manifest.json carries the Merkle root over the package
+        // contents — so a stale signature cannot describe different bytes.
         //
         // Combined with the range verdict through edgeVerdictSeverity rather
         // than by assignment, because ONE EDGE can fail both constraints and
@@ -1052,12 +1077,43 @@ std::optional<DependencyTreeNode> PackageManagerLib::resolveDependencies(const s
         // the right publisher at the wrong version is still the wrong version.
         if (dep.signer) {
             DependencyStatus signerVerdict = DependencyStatus::Installed;
-            if (!scan.observedSigner) {
+            if (!scan.manifestSigJson) {
+                // No signature installed at all. Nothing was proved and
+                // nothing disproved — see UnknownSignerPolicy for why the
+                // default does not block.
                 signerVerdict = (m_unknownSignerPolicy == UnknownSignerPolicy::Strict)
                                     ? DependencyStatus::SignerMismatch
                                     : DependencyStatus::SignerUnknown;
-            } else if (*scan.observedSigner != *dep.signer) {
-                signerVerdict = DependencyStatus::SignerMismatch;
+            } else {
+                switch (lgx_check_manifest_signature(
+                            scan.manifestBytes.data(), scan.manifestBytes.size(),
+                            scan.manifestSigJson->c_str(), dep.signer->c_str())) {
+                case LGX_SIG_CHECK_OK:
+                    break;                       // the pinned key signed this
+                case LGX_SIG_CHECK_MISMATCH:
+                    signerVerdict = DependencyStatus::SignerMismatch;
+                    break;
+                case LGX_SIG_CHECK_BAD_DID:
+                    // The PIN is not a did:jwk. A pin nobody can parse must
+                    // never read as satisfied, and it must not read as
+                    // "unknown" either: unknown is tolerated by the default
+                    // policy, so a typo'd pin would be waved through — the
+                    // exact fail-open this mechanism exists to prevent. The
+                    // fault is in the depending manifest, so say which.
+                    std::cerr << "Warning: dependency '" << dep.name << "' is pinned to '"
+                              << *dep.signer << "', which is not a did:jwk carrying an "
+                              << "Ed25519 key; the pin cannot be satisfied by anything.\n";
+                    signerVerdict = DependencyStatus::SignerMismatch;
+                    break;
+                case LGX_SIG_CHECK_UNUSABLE:
+                    // A manifest.sig is present but is not a usable signature
+                    // document. It refutes nothing, so it ranks with absence
+                    // rather than with a refusal.
+                    signerVerdict = (m_unknownSignerPolicy == UnknownSignerPolicy::Strict)
+                                        ? DependencyStatus::SignerMismatch
+                                        : DependencyStatus::SignerUnknown;
+                    break;
+                }
             }
             if (edgeVerdictSeverity(signerVerdict) > edgeVerdictSeverity(node.status))
                 node.status = signerVerdict;
@@ -1069,17 +1125,16 @@ std::optional<DependencyTreeNode> PackageManagerLib::resolveDependencies(const s
         // this scanner keeps being fixed for dropping silently.
         //
         // SignerUnknown deliberately does NOT warn: it is the expected state
-        // for every embedded package and every install predating the sidecar,
-        // and a warning that fires on the normal case trains readers to
-        // ignore the channel. It travels on the status and on `lgpm info`
-        // instead.
-        if (node.status == DependencyStatus::SignerMismatch) {
+        // for every embedded package and every unsigned one, and a warning
+        // that fires on the normal case trains readers to ignore the channel.
+        // It travels on the status and on `lgpm info` instead.
+        if (node.status == DependencyStatus::SignerMismatch && dep.signer) {
             std::cerr << "Warning: dependency '" << dep.name << "' is pinned to signer "
                       << *dep.signer << " but the installed package in " << scan.installDir
-                      << " was published by "
-                      << (scan.observedSigner ? *scan.observedSigner
-                                              : std::string("nobody recorded (no verified signature at install)"))
-                      << "; it is a different package under the same name.\n";
+                      << " was not signed by that key (it is signed by "
+                      << (scan.signerDid ? *scan.signerDid
+                                         : std::string("no key whose signature verifies"))
+                      << "); it is a different package under the same name.\n";
         }
 
         path.insert(dep.name);
@@ -1205,7 +1260,7 @@ std::vector<DependencyTreeNode> DependencyTreeNode::flatten() const
             // Cycle score -1, so they neither promote nor are promoted (an
             // absent package is absent on every edge).
             //
-            // `observedSigner` is NOT carried across: it is a property of the
+            // `signerDid` is NOT carried across: it is a property of the
             // installed package, identical on every edge that reaches it,
             // whereas requiredVersion/requiredSigner belong to the promoting
             // edge and must travel with it.
@@ -1226,7 +1281,7 @@ std::vector<DependencyTreeNode> DependencyTreeNode::flatten() const
         copy.installType     = n->installType;
         copy.requiredVersion = n->requiredVersion;
         copy.requiredSigner  = n->requiredSigner;
-        copy.observedSigner  = n->observedSigner;
+        copy.signerDid       = n->signerDid;
         out.push_back(std::move(copy));
         for (const auto& c : n->children) queue.push_back(&c);
     }
@@ -1600,6 +1655,48 @@ bool PackageManagerLib::extractLgxPackage(const std::string& lgxPath, const std:
         }
     }
 
+    // ── Carry the signature to where the signed bytes are going ────────────
+    //
+    // manifest.json above is written from lgx_get_manifest_json(), which
+    // returns getManifest().toJson() — the SAME expression Package::signPackage
+    // signs. So the manifest that lands in the install tree is byte-identical
+    // to the one the signature covers, by construction rather than by luck,
+    // and a detached Ed25519 check over the installed file is meaningful
+    // offline, long after the .lgx is deleted.
+    //
+    // Without this the install tree kept the signed bytes and threw away the
+    // signature over them, so nothing on disk could answer "who published
+    // this" and the answer had to be ASSERTED by the installer instead — a
+    // record trusted because the installer wrote it, which then needed
+    // defending against everything that can write a file. Evidence that needs
+    // defending is not evidence. This copy asserts nothing: it moves the
+    // package's own document, verbatim, and every question about it is settled
+    // later by arithmetic over a key the ASKER supplies.
+    //
+    // That is also why this belongs here rather than after the payload copy.
+    // Package::extractVariant re-adds owner_write to every file it writes
+    // (package.cpp: "NEVER extract a file the caller cannot overwrite"), so a
+    // package shipping its own read-only variants/<v>/manifest.sig cannot
+    // block the real one — the trap that needed a bespoke read-only dance when
+    // this was written into the install directory after the copy simply does
+    // not exist on this path.
+    //
+    // A package that ships no signature leaves nothing here, and an installed
+    // package with no manifest.sig reads as "nobody knows", exactly as before.
+    if (const char* sigJson = lgx_get_manifest_sig_json(pkg)) {
+        fs::path sigPath = variantOutputDir / "manifest.sig";
+        std::ofstream sf(sigPath, std::ios::binary | std::ios::trunc);
+        if (!sf.is_open() || !(sf << sigJson) || !sf.good()) {
+            // Not fatal: manifest.json is what the install NEEDS (type, name),
+            // while the signature is evidence, and its absence is already a
+            // defined and safe state. But a signed package that lands without
+            // its signature silently reads as unsigned forever, so say it.
+            std::cerr << "Warning: package '" << lgxPath << "' is signed, but its signature "
+                      << "could not be written to " << sigPath.string()
+                      << "; the installed copy will read as having no known publisher.\n";
+        }
+    }
+
     // Write a "variant" text file containing the installed variant name
     {
         fs::path variantFilePath = variantOutputDir / "variant";
@@ -1626,39 +1723,6 @@ void PackageManagerLib::setKeyringDirectory(const std::string& dir)
 void PackageManagerLib::setUnknownSignerPolicy(UnknownSignerPolicy policy)
 {
     m_unknownSignerPolicy = policy;
-}
-
-std::optional<std::string> PackageManagerLib::observedSignerFrom(
-    const SignatureVerificationResult& result)
-{
-    // Stated as everything that must hold, the way signerPinMatches and
-    // downloadedSignerBinds are, so the term that matters cannot be dropped
-    // by someone reading the other two as sufficient.
-    //
-    // `is_signed` is deliberately NOT consulted: signature_valid already
-    // implies it, and naming it here would suggest the pair is the test.
-    if (!result.signature_valid) return std::nullopt;
-    if (result.signer_did.empty()) return std::nullopt;
-    return result.signer_did;
-}
-
-const char* PackageManagerLib::observedSignerFileName()
-{
-    return "signer";
-}
-
-std::optional<std::string> PackageManagerLib::readInstalledSigner(const std::string& moduleDir)
-{
-    const std::string did = readSidecarLine(fs::path(moduleDir), observedSignerFileName());
-    // Absent file and empty file collapse to the SAME answer on purpose. An
-    // empty string is never written (the writer is gated on a non-empty DID),
-    // so seeing one means a truncated or hand-made file — and returning it as
-    // an identity would let "" compare against a pin, or be mistaken for
-    // "observed to be unsigned". There is no such observation; the only two
-    // answers this file can carry are "this DID" and "nothing recorded".
-    if (did.empty())
-        return std::nullopt;
-    return did;
 }
 
 SignatureVerificationResult PackageManagerLib::verifyPackageSignature(const std::string& lgxPath)

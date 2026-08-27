@@ -42,13 +42,14 @@ void to_json(nlohmann::json& j, const InstalledPackage& p)
     // or a signer DID, so today's manifests serialise byte-identically.
     if (!p.dependencyConstraints.empty())
         j["dependencyConstraints"] = p.dependencyConstraints;
-    // The publisher this copy's signature was VERIFIED against. Additive, and
-    // emitted only when something was actually observed — so an unsigned,
-    // embedded or pre-sidecar install serialises byte-identically to before,
-    // and a reader can tell "no publisher recorded" (key absent) from a
-    // recorded one. A key present with an empty value would be neither.
-    if (p.observedSigner)
-        j["observedSigner"] = *p.observedSigner;
+    // The DID the installed manifest.sig names, once checked against its own
+    // embedded key — see InstalledPackage::signerDid. Additive, and emitted
+    // only when a usable signature is installed, so an unsigned or embedded
+    // package serialises byte-identically to before and a reader can tell "no
+    // signature" (key absent) from a signed one. A key present with an empty
+    // value would be neither.
+    if (p.signerDid)
+        j["signerDid"] = *p.signerDid;
     j["hashes"]       = p.hashes;
     j["installType"]  = installTypeToString(p.installType);
     j["installDir"]   = p.installDir;
@@ -77,10 +78,13 @@ void to_json(nlohmann::json& j, const DependencyTreeNode& n)
     // serialises byte-identically to before.
     if (n.requiredVersion) j["requiredVersion"] = *n.requiredVersion;
     if (n.requiredSigner)  j["requiredSigner"]  = *n.requiredSigner;
-    // The other half of a signer report: who actually published what is
-    // installed. Absent when nothing recorded a publisher — which is what
-    // makes a `signer_unknown` row legible without a second lookup.
-    if (n.observedSigner)  j["observedSigner"]  = *n.observedSigner;
+    // The other half of a signer report: who the installed package's own
+    // signature says signed it. Absent when no usable signature is installed —
+    // which is what makes a `signer_unknown` row legible without a second
+    // lookup. NOT the field `status` was derived from: the verdict comes from
+    // verifying that signature against `requiredSigner`'s key, so these two
+    // can differ without the row being inconsistent.
+    if (n.signerDid)  j["signerDid"]  = *n.signerDid;
     j["children"] = n.children;
 }
 
