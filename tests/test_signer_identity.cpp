@@ -337,11 +337,18 @@ TEST_F(SignerIdentityTest, A1_AGenuineSignatureOverOtherBytesIsRefused) {
     EXPECT_EQ(statusOf("app", "a1replay"), DependencyStatus::SignerMismatch);
 }
 
-// A2: the record outlives the package it described. copyDirectoryContents
-// MERGES into an existing directory, so a reinstall leaves the first install's
-// manifest.sig standing. It buys nothing: the manifest underneath it was
-// replaced, and the signature is over the manifest.
-TEST_F(SignerIdentityTest, A2_AStaleSignatureFromThePreviousInstallIsRefused) {
+// A2: the record does NOT outlive the package it described. The install swaps
+// the whole tree, so an unsigned reinstall leaves no manifest.sig at all and
+// there is no stale signature to reason about. This read the other way while
+// the copy MERGED: the first install's signature stood over a manifest it had
+// never signed, and the package was refused as SignerMismatch -- blocking, but
+// for a reason that was not true.
+//
+// What guards the case now is the pin alone. An unsigned package under a
+// `signer` pin is SignerUnknown, which Lenient does NOT block and Strict does.
+// Both halves are asserted so the exposure is stated here rather than implied,
+// and so a change to the default policy shows up in this test.
+TEST_F(SignerIdentityTest, A2_AnUnsignedReinstallLeavesNoSignatureBehind) {
     auto key = generateKey("first");
     ASSERT_FALSE(key.empty());
     const std::string firstDid = readDid("first");
@@ -359,11 +366,20 @@ TEST_F(SignerIdentityTest, A2_AStaleSignatureFromThePreviousInstallIsRefused) {
     auto impostor = createPackage("a2", "2.0.0");
     ASSERT_FALSE(impostor.empty());
     ASSERT_FALSE(pm.installPluginFile(impostor.string(), err).empty()) << err;
-    // Deliberately NOT cleared: it is refused on its merits below.
-    ASSERT_TRUE(fs::exists(installedDirOf("a2") / "manifest.sig"));
+    EXPECT_FALSE(fs::exists(installedDirOf("a2") / "manifest.sig"))
+        << "a signature outlived the package it described";
 
     writeInstalled("app", {objDep("a2", "", firstDid)});
-    EXPECT_EQ(statusOf("app", "a2"), DependencyStatus::SignerMismatch);
+    EXPECT_EQ(statusOf("app", "a2"), DependencyStatus::SignerUnknown);
+
+    // Strict is what refuses it, and Lenient is still the default.
+    auto strict = createPM();
+    strict.setUnknownSignerPolicy(UnknownSignerPolicy::Strict);
+    auto tree = strict.resolveDependencies("app");
+    ASSERT_TRUE(tree.has_value());
+    const auto* dep = childNamed(*tree, "a2");
+    ASSERT_NE(dep, nullptr);
+    EXPECT_EQ(dep->status, DependencyStatus::SignerMismatch);
 }
 
 // A3: the plant is read-only, which out of the Nix store is ordinary. A

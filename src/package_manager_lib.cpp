@@ -24,6 +24,11 @@ using json = nlohmann::json;
 // mode 0444 removes fine on Linux and macOS and denies on Windows -- which is
 // why this was invisible until a package was installed there.
 //
+// The class is NOT Windows-only. A read-only DIRECTORY denies file CREATION on
+// POSIX as well: a module staged by copying `nix build .#install`'s output
+// inherits the store's 0555 directory mode, and every later install into it
+// fails at copy_file. Measured on macOS.
+//
 // Everything in the Nix store is 0444, and nix-bundle-lgx copies a module's
 // `icon:` straight out of it, so every .lgx with an icon carries at least one
 // read-only file. Measured on the extracted payload: the root `hello.svg` was
@@ -64,6 +69,63 @@ static bool removeTreeQuietly(const fs::path& p) {
     if (ec) {
         std::cerr << "Warning: could not remove " << p.string() << ": " << ec.message()
                   << " (leaving it behind; this does not affect the install)" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// Name for one of lgpm's own working trees, a sibling of the install it is
+// replacing. Random so two installs of one package cannot collide, and
+// dot-prefixed because enumerateManifests skips that namespace -- a staging
+// tree carries a valid manifest.json and would otherwise shadow the very
+// module it was made from if it ever survived a crash.
+static std::string reservedSiblingName(const char* role, const std::string& moduleName) {
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<uint64_t> dist;
+    std::ostringstream oss;
+    oss << ".lgpm-" << role << "-" << moduleName << "-" << std::hex << dist(gen);
+    return oss.str();
+}
+
+// Put `staged` at `dest`, replacing whatever is there, without the two installs
+// ever being MERGED. rename() cannot replace a non-empty directory, so an
+// existing tree is retired first: the gap between the two renames is the only
+// moment the module is absent, and what is there is always one install or the
+// other, never half of each.
+static bool swapIntoPlace(const fs::path& staged, const fs::path& dest, std::string& errorMsg) {
+    std::error_code ec;
+
+    if (fs::exists(dest, ec)) {
+        // Cleared before it is retired, not after: a read-only tree is exactly
+        // what wedged the install, and removeTreeQuietly should not have to
+        // discover that on its retry.
+        clearReadOnlyRecursive(dest);
+
+        fs::path retired = dest.parent_path() / reservedSiblingName("retired", dest.filename().string());
+        fs::rename(dest, retired, ec);
+        if (ec) {
+            errorMsg = "Failed to move the existing install aside: " + dest.string() + " - " + ec.message();
+            return false;
+        }
+
+        fs::rename(staged, dest, ec);
+        if (ec) {
+            errorMsg = "Failed to move the staged install into place: " + dest.string() + " - " + ec.message();
+            std::error_code restoreEc;
+            fs::rename(retired, dest, restoreEc);   // put the working install back
+            if (restoreEc)
+                errorMsg += "; the previous install is at " + retired.string();
+            return false;
+        }
+
+        removeTreeQuietly(retired);
+        return true;
+    }
+
+    fs::rename(staged, dest, ec);
+    if (ec) {
+        errorMsg = "Failed to move the staged install into place: " + dest.string() + " - " + ec.message();
         return false;
     }
     return true;
@@ -681,6 +743,14 @@ static std::map<std::string, ScanEntry> enumerateManifests(
             if (dirEc) break;
             std::error_code entryEc;
             if (!entry.is_directory(entryEc) || entryEc)
+                continue;
+
+            // lgpm's own staging and retired trees are dot-prefixed siblings of
+            // the real install. One can outlive a crash mid-swap, and it holds a
+            // valid manifest.json, so it would shadow the module it was made
+            // from. isValidModuleName keeps packages out of that namespace.
+            const std::string dirName = entry.path().filename().string();
+            if (!dirName.empty() && dirName.front() == '.')
                 continue;
 
             fs::path manifestPath = entry.path() / "manifest.json";
@@ -1418,6 +1488,13 @@ bool PackageManagerLib::isValidModuleName(const std::string& name)
     if (name.empty() || name == "." || name == "..")
         return false;
 
+    // A leading '.' is lgpm's own namespace -- the staging and retired trees a
+    // swap creates are dot-prefixed siblings, and enumerateManifests skips the
+    // whole prefix. A package claiming it would install and then never be
+    // listed.
+    if (name.front() == '.')
+        return false;
+
     for (char c : name) {
         // '/' and '\\' are path separators; ':' is a Windows drive separator
         // ("C:foo" is drive-relative); '\0' truncates the path at the C ABI.
@@ -1724,13 +1801,38 @@ bool PackageManagerLib::copyLibraryFromExtracted(const std::string& extractedDir
         }
     }
 
-    // The previous install's manifest.sig is deliberately NOT removed here.
-    // copyDirectoryContents MERGES, so an UNSIGNED package reinstalled over a
-    // signed one keeps the old signature and reports SignerMismatch — wrong
-    // cause, but blocking. Deleting it yields SignerUnknown, which Lenient does
-    // NOT block, so an unsigned impostor would start passing. Fix the wording,
-    // not the evidence (A2_AStaleSignatureFromThePreviousInstallIsRefused).
-    if (!copyDirectoryContents(variantDir, moduleSubDir, errorMsg)) {
+    // Build the new install beside the destination and swap it in, rather than
+    // copying over the old tree. Copying in place MERGED the two: a copy that
+    // failed midway left a mixture that was neither install (measured at six of
+    // eight payload files, with no manifest.json and no variant), and an
+    // upgrade that dropped a file left the old one behind forever. Staging is a
+    // sibling so the swap is a rename on the same filesystem.
+    //
+    // It also sidesteps the wedge this class of bug is named for: a destination
+    // left mode 0555 -- what `cp -R` out of `nix build .#install` produces,
+    // since the Nix store is 0555/0444 and cp without -p keeps both -- refuses
+    // every NEW file, so the old in-place copy could never overwrite it.
+    fs::path stagingDir = fs::path(targetDir) / reservedSiblingName("staging", moduleName);
+
+    if (!copyDirectoryContents(variantDir, stagingDir.string(), errorMsg)) {
+        removeTreeQuietly(stagingDir);
+        return false;
+    }
+
+    // Nothing is carried over from the previous install, manifest.sig included.
+    // The merge used to leave it standing over a manifest it did not sign, so
+    // an unsigned reinstall was refused as SignerMismatch -- blocking, but for
+    // the wrong reason. What is installed is now exactly what the package
+    // shipped; an unsigned one reads as SignerUnknown, and closing that is the
+    // unknown-signer POLICY's job, not the copier's
+    // (A2_AnUnsignedReinstallLeavesNoSignatureBehind).
+
+    // The payload carries whatever modes the archive recorded. Windows refuses
+    // to delete a read-only file, so leaving them breaks the next uninstall.
+    clearReadOnlyRecursive(stagingDir);
+
+    if (!swapIntoPlace(stagingDir, fs::path(moduleSubDir), errorMsg)) {
+        removeTreeQuietly(stagingDir);
         return false;
     }
 

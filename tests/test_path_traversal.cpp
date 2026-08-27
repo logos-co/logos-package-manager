@@ -154,3 +154,12 @@ TEST(IsValidModuleNameTest, RejectsTraversalAndSeparators) {
     EXPECT_FALSE(PackageManagerLib::isValidModuleName("a\\b"));
     EXPECT_FALSE(PackageManagerLib::isValidModuleName(std::string("nul\0byte", 8)));
 }
+
+// The dot prefix is lgpm's own working namespace -- the staging and retired
+// trees a swap creates are dot-prefixed siblings, and enumerateManifests skips
+// the whole prefix, so a package installed under it would never be listed.
+TEST(IsValidModuleNameTest, RejectsLgpmsOwnDotNamespace) {
+    EXPECT_FALSE(PackageManagerLib::isValidModuleName(".hidden"));
+    EXPECT_FALSE(PackageManagerLib::isValidModuleName(".lgpm-staging-waku_module-4f2a"));
+    EXPECT_TRUE(PackageManagerLib::isValidModuleName("Module.v2"));   // a dot INSIDE is fine
+}

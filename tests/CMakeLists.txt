@@ -11,6 +11,7 @@ add_executable(lgpm_tests
     test_signer_identity.cpp
     test_uninstall.cpp
     test_path_traversal.cpp
+    test_readonly_install.cpp
 )
 
 # Signature tests need lgx.h and liblgx
