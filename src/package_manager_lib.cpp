@@ -1064,6 +1064,37 @@ std::optional<DependencyTreeNode> PackageManagerLib::resolveDependencies(const s
         // the name — manifest.json carries the Merkle root over the package
         // contents — so a stale signature cannot describe different bytes.
         //
+        // WHAT THIS DELIBERATELY DOES NOT DO: re-hash the installed payload.
+        //
+        // The signed manifest carries a Merkle tree over the package contents
+        // (hashes.root, hashes.variants, hashes["variants/<v>"]), so verifying
+        // the signature transitively establishes what the payload SHOULD hash
+        // to, and re-hashing what is on disk would turn this into a tamper
+        // check as well as an identity check. That is genuinely newly
+        // possible, and it still does not belong here, for two reasons.
+        //
+        // COST. Checking the signature is ~450us and is CONSTANT: the message
+        // is a ~600-byte manifest whatever the package weighs. Re-hashing is
+        // linear in the payload — SHA-256 runs at ~1 GB/s on this hardware, so
+        // ~2.4ms for a 2.6 MB module and ~47ms for a 50 MB one, before any
+        // file I/O. resolveDependencies walks every edge and basecamp calls it
+        // on refresh, so that is a per-frame cost that grows with what the
+        // user has installed.
+        //
+        // CORRECTNESS, which is the stronger reason. The tree is computed over
+        // TAR ENTRY PATHS and the install tree is FLATTENED and ADDED TO:
+        // `variants/<v>/x.so` becomes `<name>/x.so`, `assets/` is merged into
+        // the same directory, and extractLgxPackage synthesises manifest.json,
+        // manifest.sig and `variant` there. Measured on a real package, the
+        // leaf hash covers ONE file while the install directory holds four.
+        // Re-deriving it means re-prefixing paths and excluding exactly the
+        // files install invented — a mapping that is easy to get subtly wrong
+        // and whose failure mode is a false accusation of tampering.
+        //
+        // So: a separate, deliberately-tested verb (`lgpm verify <package>`),
+        // run on demand, not an implicit cost on a resolve that today answers
+        // a question about identity.
+        //
         // Combined with the range verdict through edgeVerdictSeverity rather
         // than by assignment, because ONE EDGE can fail both constraints and
         // the node reports one status. A signer mismatch outranks a version
