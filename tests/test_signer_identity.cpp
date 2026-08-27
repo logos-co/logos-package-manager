@@ -853,6 +853,36 @@ TEST_F(SignerIdentityTest, TheInstalledManifestCarriesNoTextModeTranslation) {
            "differ from the signed message and no signature can verify";
 }
 
+// F2 — a constraint that is PRESENT but not a string must fail CLOSED.
+//
+// The parser used to gate reading on is_string(), so `{"signer": 42}` produced
+// no pin at all: the dependent asked to be narrowed and got no check, which is
+// indistinguishable downstream from never having asked. Carrying the raw text
+// makes it unparseable as a did:jwk, so it lands as SignerMismatch and names
+// the offending value.
+TEST_F(SignerIdentityTest, AWrongTypedSignerPinFailsClosedRatherThanVanishing) {
+    ASSERT_FALSE(generateKey("mine").empty());
+    ASSERT_FALSE(installSigned("dep", "mine").empty());
+    writeInstalled("app", {json{{"name","dep"},{"signer",42}}});
+
+    auto tree = createPM().resolveDependencies("app");
+    ASSERT_TRUE(tree.has_value());
+    const json dep = json(*tree)["children"][0];
+    EXPECT_EQ(dep["status"], "signer_mismatch")
+        << "a malformed signer pin silently became 'no pin' — fail-open on the "
+           "one field whose job is to narrow what satisfies the edge";
+}
+
+TEST_F(SignerIdentityTest, AWrongTypedVersionRangeFailsClosedRatherThanVanishing) {
+    writeInstalled("dep");
+    writeInstalled("app", {json{{"name","dep"},{"version",42}}});
+
+    auto tree = createPM().resolveDependencies("app");
+    ASSERT_TRUE(tree.has_value());
+    const json dep = json(*tree)["children"][0];
+    EXPECT_EQ(dep["status"], "version_mismatch");
+}
+
 TEST_F(SignerIdentityTest, EverySignerStatusCountsAsOnDisk) {
     EXPECT_TRUE(nodeResolvedToAnInstalledPackage(DependencyStatus::Installed));
     EXPECT_TRUE(nodeResolvedToAnInstalledPackage(DependencyStatus::VersionMismatch));

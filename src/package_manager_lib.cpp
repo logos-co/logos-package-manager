@@ -815,10 +815,33 @@ static std::map<std::string, ScanEntry> enumerateManifests(
                         dep.name = d.get<std::string>();
                     } else if (d.is_object() && d.contains("name") && d["name"].is_string()) {
                         dep.name = d["name"].get<std::string>();
-                        if (d.contains("version") && d["version"].is_string())
-                            dep.version = d["version"].get<std::string>();
-                        if (d.contains("signer") && d["signer"].is_string())
-                            dep.signer = d["signer"].get<std::string>();
+                        // PRESENT BUT NOT A STRING IS MALFORMED, NOT ABSENT.
+                        //
+                        // Testing `is_string()` as a precondition for reading
+                        // silently turns `{"signer": 42}` into "no pin" — the
+                        // dependent asked for a constraint and gets no check at
+                        // all. That is fail-OPEN on the two fields whose entire
+                        // job is to narrow what satisfies an edge, and it is
+                        // indistinguishable downstream from a dependent that
+                        // never asked.
+                        //
+                        // Carry the raw text instead. It cannot parse as a
+                        // semver range or as a did:jwk, so it fails CLOSED —
+                        // VersionMismatch / SignerMismatch — and the operator
+                        // sees the offending value in the message rather than
+                        // silence. `lgpm install` cannot reach this (logos-package
+                        // rejects both shapes first); a hand-edited or build-time
+                        // embedded manifest can.
+                        if (d.contains("version")) {
+                            dep.version = d["version"].is_string()
+                                        ? d["version"].get<std::string>()
+                                        : d["version"].dump();
+                        }
+                        if (d.contains("signer")) {
+                            dep.signer = d["signer"].is_string()
+                                       ? d["signer"].get<std::string>()
+                                       : d["signer"].dump();
+                        }
                     }
                     // Neither form, or a name that is present but empty: the
                     // entry declares no edge. SAY SO — dropping it silently is
@@ -1882,6 +1905,27 @@ bool PackageManagerLib::copyLibraryFromExtracted(const std::string& extractedDir
         }
     }
 
+    // NOT removed here, deliberately — see F3 in the audit, and why its stated
+    // fix is wrong. copyDirectoryContents MERGES, so reinstalling an UNSIGNED
+    // package over a signed one leaves the previous publisher's manifest.sig
+    // behind. The audit called that a wrong-CAUSE message, and it is: the
+    // operator is told the publisher does not match when the truth is that this
+    // package has no publisher at all.
+    //
+    // But deleting it trades a wrong message for a wrong VERDICT. The stale
+    // signature cannot verify against the rewritten manifest, so it yields
+    // SignerMismatch, which BLOCKS. Remove it and the same reinstall yields
+    // SignerUnknown, which under UnknownSignerPolicy::Lenient does NOT block —
+    // so an unsigned impostor replacing a signed package would start passing.
+    // That case is a publisher DOWNGRADE and there is positive evidence for it,
+    // which is exactly what distinguishes it from the never-signed packages
+    // Lenient exists to tolerate.
+    //
+    // The defect is therefore in the REPORTING layer, not here: "the installed
+    // signature does not verify against this package" and "this package names a
+    // different publisher" need to be different sentences. Fixing it by
+    // deleting the evidence is measured, and it breaks
+    // A2_AStaleSignatureFromThePreviousInstallIsRefused for a real reason.
     if (!copyDirectoryContents(variantDir, moduleSubDir, errorMsg)) {
         return false;
     }
