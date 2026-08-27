@@ -4,9 +4,6 @@
   inputs = {
     logos-nix.url = "github:logos-co/logos-nix";
     nixpkgs.follows = "logos-nix/nixpkgs";
-    # Pinned to the branch that adds lgx_get_manifest_sig_json /
-    # lgx_check_manifest_signature. Move back to the bare URL once
-    # logos-co/logos-package merges feat/carry-the-manifest-signature.
     logos-package.url = "github:logos-co/logos-package";
     nix-bundle-dir.url = "github:logos-co/nix-bundle-dir";
     nix-bundle-appimage.url = "github:logos-co/nix-bundle-appimage";
