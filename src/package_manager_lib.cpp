@@ -790,8 +790,15 @@ static std::map<std::string, ScanEntry> enumerateManifests(
             scan.version = manifest.value("version", "");
             scan.installDir = entry.path().string();
             scan.installType = installType;
-            // Resolved before manifestBytes is moved from, below.
-            scan.mainFilePath = resolveMain(entry.path(), *manifestBytes, variants).path;
+            // Resolved before manifestBytes is moved from, below. Reported
+            // against entry.path(), NOT the absolute path lgx_resolve_main
+            // returns: installDir inherits the caller's form, and the two must
+            // agree so a relative --modules-dir does not yield one of each.
+            {
+                const ResolvedMain m = resolveMain(entry.path(), *manifestBytes, variants);
+                if (m.state == LGX_MAIN_RESOLVED)
+                    scan.mainFilePath = (entry.path() / m.declaredPath).string();
+            }
             // Both halves verbatim — see ScanEntry::manifestBytes.
             scan.manifestBytes   = std::move(*manifestBytes);
             scan.manifestSigJson = readFileBytes(entry.path() / "manifest.sig");

@@ -168,6 +168,30 @@ TEST_F(ScanningTest, UiQmlScanResolvesBackendMainFilePath) {
     EXPECT_NE(plugins[0].mainFilePath.find("backend.so"), std::string::npos);
 }
 
+TEST_F(ScanningTest, MainFilePathAgreesInFormWithInstallDir) {
+    // A relative --modules-dir must not yield a relative installDir and an
+    // absolute mainFilePath: consumers derive the declared name by stripping
+    // one from the other, and an absolute path also leaks cwd into --json.
+    createFakeModule("relform", "core", "1.0.0", "relform.so", "");
+
+    const fs::path cwd = fs::current_path();
+    fs::current_path(tempDir.parent_path());
+    const std::string relDir = tempDir.filename().string();
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(relDir);
+    auto mods = pm.getInstalledModules();
+    fs::current_path(cwd);
+
+    ASSERT_EQ(mods.size(), 1u);
+    ASSERT_FALSE(mods[0].mainFilePath.empty());
+    EXPECT_EQ(fs::path(mods[0].installDir).is_absolute(),
+              fs::path(mods[0].mainFilePath).is_absolute())
+        << "installDir='" << mods[0].installDir
+        << "' mainFilePath='" << mods[0].mainFilePath << "'";
+    EXPECT_FALSE(fs::path(mods[0].mainFilePath).is_absolute());
+}
+
 TEST_F(ScanningTest, MultipleDirectoriesCombined) {
     fs::path dir2 = fs::temp_directory_path() / ("lgpm_test2_" + std::to_string(std::rand()));
     fs::create_directories(dir2);
