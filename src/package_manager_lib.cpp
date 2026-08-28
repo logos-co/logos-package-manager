@@ -514,6 +514,45 @@ std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, 
     return installDir;
 }
 
+namespace {
+
+// Defined below, next to the other file readers.
+static std::optional<std::string> readFileBytes(const fs::path& path);
+
+// The manifest's `main`, resolved by logos-package. Variant keys are keys of
+// the signed hash tree that library writes, so it owns the resolution and this
+// one asks. It also applies the guards this code never had: a path escaping the
+// module directory, or naming a directory, is MALFORMED_ENTRY rather than a
+// path handed back to a caller that cannot load it.
+struct ResolvedMain {
+    lgx_main_resolution_t state = LGX_MAIN_BAD_INPUT;
+    std::string path;          // absolute; empty unless RESOLVED
+    std::string declaredPath;  // relative, as the manifest wrote it
+};
+
+ResolvedMain resolveMain(const fs::path& moduleDir,
+                         const std::string& manifestBytes,
+                         const std::vector<std::string>& variants)
+{
+    std::vector<const char*> candidates;
+    candidates.reserve(variants.size() + 1);
+    for (const auto& v : variants)
+        candidates.push_back(v.c_str());
+    candidates.push_back(nullptr);
+
+    lgx_main_file_t resolved = lgx_resolve_main(moduleDir.string().c_str(),
+                                                manifestBytes.data(), manifestBytes.size(),
+                                                candidates.data());
+    ResolvedMain out;
+    out.state = resolved.state;
+    if (resolved.path) out.path = resolved.path;
+    if (resolved.declared_path) out.declaredPath = resolved.declared_path;
+    lgx_free_main_file(resolved);
+    return out;
+}
+
+} // namespace
+
 std::string PackageManagerLib::resolveInstalledPackagePath(const std::string& moduleDir,
                                                            const std::vector<std::string>& variants)
 {
@@ -523,28 +562,18 @@ std::string PackageManagerLib::resolveInstalledPackagePath(const std::string& mo
     std::string mainFile;
     bool isQmlPackage = false;
 
-    fs::path manifestPath = dir / "manifest.json";
-    if (fs::exists(manifestPath)) {
-        std::ifstream mf(manifestPath);
-        if (mf.is_open()) {
-            try {
-                json doc = json::parse(mf);
-                isQmlPackage = (doc.value("type", "") == "ui_qml");
-                if (doc.contains("main")) {
-                    if (doc["main"].is_object()) {
-                        for (const auto& v : variants) {
-                            if (doc["main"].contains(v)) {
-                                mainFile = doc["main"][v].get<std::string>();
-                                if (!mainFile.empty())
-                                    break;
-                            }
-                        }
-                    } else if (doc["main"].is_string()) {
-                        mainFile = doc["main"].get<std::string>();
-                    }
-                }
-            } catch (...) {}
-        }
+    if (const std::optional<std::string> manifestBytes = readFileBytes(dir / "manifest.json")) {
+        try {
+            isQmlPackage = (json::parse(*manifestBytes).value("type", "") == "ui_qml");
+        } catch (...) {}
+
+        // The DECLARED name, not the resolved path: the synthesis below appends
+        // a platform extension to an extension-less one, so it works on the
+        // name the manifest wrote. A main that resolved nowhere usable leaves
+        // this empty and falls through to that synthesis.
+        const ResolvedMain resolved = resolveMain(dir, *manifestBytes, variants);
+        if (resolved.state == LGX_MAIN_RESOLVED || resolved.state == LGX_MAIN_FILE_MISSING)
+            mainFile = resolved.declaredPath;
     }
 
     // Only non-ui_qml packages get a main file synthesised from the module
@@ -615,36 +644,6 @@ struct ScanEntry {
     std::optional<std::string> manifestSigJson;   // nullopt = no manifest.sig
     json manifest;  // full manifest.json — used to emit the JSON passthrough
 };
-
-static std::string resolveMainFilePath(const json& manifest,
-                                       const fs::path& moduleDir,
-                                       const std::vector<std::string>& variants)
-{
-    if (!manifest.contains("main"))
-        return {};
-
-    if (manifest["main"].is_object()) {
-        const auto& mainObj = manifest["main"];
-        for (const auto& variant : variants) {
-            if (mainObj.contains(variant)) {
-                std::string mainFile = mainObj[variant].get<std::string>();
-                if (!mainFile.empty()) {
-                    fs::path candidate = moduleDir / mainFile;
-                    return fs::exists(candidate) ? candidate.string() : std::string{};
-                }
-            }
-        }
-        return {};
-    }
-    if (manifest["main"].is_string()) {
-        std::string mainFile = manifest["main"].get<std::string>();
-        if (mainFile.empty())
-            return {};
-        fs::path candidate = moduleDir / mainFile;
-        return fs::exists(candidate) ? candidate.string() : std::string{};
-    }
-    return {};
-}
 
 // Read a whole file as bytes. nullopt when it is missing or unreadable; an
 // EMPTY file reads as an empty string, and callers rely on the distinction.
@@ -791,7 +790,15 @@ static std::map<std::string, ScanEntry> enumerateManifests(
             scan.version = manifest.value("version", "");
             scan.installDir = entry.path().string();
             scan.installType = installType;
-            scan.mainFilePath = resolveMainFilePath(manifest, entry.path(), variants);
+            // Resolved before manifestBytes is moved from, below. Reported
+            // against entry.path(), NOT the absolute path lgx_resolve_main
+            // returns: installDir inherits the caller's form, and the two must
+            // agree so a relative --modules-dir does not yield one of each.
+            {
+                const ResolvedMain m = resolveMain(entry.path(), *manifestBytes, variants);
+                if (m.state == LGX_MAIN_RESOLVED)
+                    scan.mainFilePath = (entry.path() / m.declaredPath).string();
+            }
             // Both halves verbatim — see ScanEntry::manifestBytes.
             scan.manifestBytes   = std::move(*manifestBytes);
             scan.manifestSigJson = readFileBytes(entry.path() / "manifest.sig");
@@ -1370,109 +1377,30 @@ std::string PackageManagerLib::currentPlatformVariant()
     if (!g_platformVariantOverride.empty()) {
         return g_platformVariantOverride;
     }
-
-#if defined(__APPLE__)
-    #if defined(__aarch64__)
-        return "darwin-arm64";
-    #else
-        return "darwin-x86_64";
-    #endif
-#elif defined(__linux__)
-    #if defined(__x86_64__)
-        return "linux-x86_64";
-    #elif defined(__aarch64__)
-        return "linux-arm64";
-    #else
-        return "linux-x86";
-    #endif
-#elif defined(_WIN32)
-    #if defined(_M_X64) || defined(__x86_64__)
-        return "windows-x86_64";
-    #else
-        return "windows-x86";
-    #endif
-#else
-    return "unknown";
-#endif
+    // Compile-time, and logos-package's to compute: it writes the variant names
+    // into the signed hash tree, so it owns their vocabulary.
+    return lgx_host_variant();
 }
-
-namespace {
-
-// The one place a variant-name SPELLING is enumerated.
-//
-// A variant name is "<os>-<architecture>", and both halves have more than one
-// live spelling in this ecosystem. Canonical vocabulary is the one
-// logos-module-builder's lib/resolvePlatforms.nix pins -- os in
-// {linux, darwin, windows}, architecture in {x86_64, aarch64} -- so the first
-// entry of every row below is the canonical spelling and the rest are legacy
-// ones that some producer actually writes:
-//
-//   nix-bundle-lgx/flake.nix:52                   darwin-amd64  linux-amd64
-//                                                 darwin-arm64  linux-arm64
-//   nix-bundle-logos-module-install/flake.nix:49  darwin-x86_64 linux-x86_64
-//                                                 darwin-arm64  linux-arm64
-//
-// Those two producers disagree with each other while the SECOND CONSUMES THE
-// FIRST -- it bundles a .lgx the first named and then calls this package
-// manager with --platform spelled its own way -- so this consumer is where the
-// disagreement has to be absorbed.
-//
-// Only the ARCHITECTURE is aliased. The OS half is matched verbatim on
-// purpose: aliasing it would weaken the fail-closed check that stops a Windows
-// package being installed as a macOS one, and "macos" (logos-release-set's
-// release-ASSET naming) is a different namespace that is translated to
-// "darwin" before it ever reaches an .lgx.
-//
-// Adding a spelling here is safe -- it only ever widens what an EXISTING
-// package resolves to, and rows are per-architecture so a new OS inherits
-// every alias without a new code path. Removing one is not: variant names sit
-// inside the signed hash tree (logos-package writes hashes["variants/<name>"]),
-// so a published package can never be renamed on disk. Alias on read.
-const std::vector<std::vector<std::string>>& architectureSpellings()
-{
-    static const std::vector<std::vector<std::string>> kSpellings = {
-        { "x86_64",  "amd64" },
-        { "aarch64", "arm64" },
-    };
-    return kSpellings;
-}
-
-} // namespace
 
 std::vector<std::string> PackageManagerLib::platformVariantsToTry()
 {
-    const std::string primary = currentPlatformVariant();
     std::vector<std::string> variants;
-
     // The host's own spelling always leads: it is what diagnostics print as
     // "this machine", and what errorMsg names as the platform that was wanted.
-    variants.push_back(primary);
-
-    // Split on the LAST '-' so the architecture is the trailing component
-    // whatever the OS half turns out to contain.
-    const std::string::size_type sep = primary.rfind('-');
-    if (sep != std::string::npos) {
-        const std::string os = primary.substr(0, sep);
-        const std::string arch = primary.substr(sep + 1);
-        for (const auto& row : architectureSpellings()) {
-            if (std::find(row.begin(), row.end(), arch) == row.end())
-                continue;
-            for (const auto& spelling : row) {
-                if (spelling != arch)
-                    variants.push_back(os + "-" + spelling);
-            }
-            break;
-        }
+    const char** spellings = lgx_variant_spellings(currentPlatformVariant().c_str());
+    if (spellings) {
+        for (const char** s = spellings; *s != nullptr; ++s)
+            variants.emplace_back(*s);
+        lgx_free_string_array(spellings);
     }
-    // An architecture no row knows degrades to "this host's spelling only",
-    // which is the pre-alias behaviour and still fail-closed.
 
+    // "-dev" is a contract of THIS binary's build variant, which liblgx cannot
+    // know. Expanded spellings first, then suffixed: "darwin-arm64-dev" aliases
+    // nothing.
 #ifndef LGPM_PORTABLE_BUILD
-    std::vector<std::string> devVariants;
-    for (const auto& variant : variants) {
-        devVariants.push_back(variant + "-dev");
+    for (auto& variant : variants) {
+        variant += "-dev";
     }
-    variants = devVariants;
 #endif
 
     return variants;

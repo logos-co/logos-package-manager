@@ -123,7 +123,12 @@ LGPM_EXPORT const char** lgpm_get_module_dependents(lgpm_context_t ctx,
 
 /**
  * Set signature verification policy.
- * @param policy "none", "warn", or "require"
+ * @param policy "none", "warn", or "require" (case-insensitive)
+ *
+ * An unrecognised value leaves the policy UNCHANGED and reports on stderr —
+ * it does not fall back to a default. The default is "warn", so a caller that
+ * asks for "require" and mistypes it would otherwise install unsigned
+ * packages believing it had refused them.
  */
 LGPM_EXPORT void lgpm_set_signature_policy(lgpm_context_t ctx, const char* policy);
 

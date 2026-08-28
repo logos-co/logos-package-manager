@@ -1,4 +1,6 @@
 #include "lgpm.h"
+#include <iostream>
+#include <algorithm>
 #include "package_manager_lib.h"
 #include "package_manager_json.h"
 #include <cstring>
@@ -182,10 +184,18 @@ const char** lgpm_get_module_dependents(lgpm_context_t ctx,
 
 void lgpm_set_signature_policy(lgpm_context_t ctx, const char* policy) {
     if (!ctx || !policy) return;
+    // Case-insensitive, and an unknown value is REPORTED. Silently keeping the
+    // permissive default is how a caller asking for "require" and mistyping it
+    // ends up installing unsigned packages with no signal.
     std::string p(policy);
+    std::transform(p.begin(), p.end(), p.begin(), ::tolower);
     if (p == "none") ctx->lib.setSignaturePolicy(SignaturePolicy::NONE);
     else if (p == "warn") ctx->lib.setSignaturePolicy(SignaturePolicy::WARN);
     else if (p == "require") ctx->lib.setSignaturePolicy(SignaturePolicy::REQUIRE);
+    else {
+        std::cerr << "lgpm_set_signature_policy: invalid policy '" << policy
+                  << "' - expected one of: none, warn, require. Policy unchanged.\n";
+    }
 }
 
 void lgpm_set_keyring_path(lgpm_context_t ctx, const char* dir) {
