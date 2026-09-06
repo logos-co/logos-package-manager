@@ -172,6 +172,16 @@ struct InstalledPackage {
     // and every unsigned package) or one that does not verify even under its
     // own DID. It never means "unsigned".
     std::optional<std::string> signerDid;
+
+    // Concrete dependencies the package can call but does NOT require
+    // (manifest `optional_dependencies`). Kept apart from `dependencies`
+    // because an absent one is not a broken install: the runtime never
+    // auto-loads them and never fails a load over them.
+    std::vector<PackageDependency> optionalDependencies;
+    // Interface contracts bound to a provider by name at runtime (manifest
+    // `interface_dependencies`). Names only, and unresolvable to a package by
+    // construction — carried so a UI can show what a module expects to find.
+    std::vector<std::string> interfaceDependencies;
     Hashes hashes;
     InstallType installType;
     std::string installDir;
@@ -196,6 +206,15 @@ struct DependencyTreeNode {
     // reports whichever failed.
     std::optional<std::string> requiredVersion;
     std::optional<std::string> requiredSigner;
+    // Was the edge reaching this node declared OPTIONAL? A per-edge fact like
+    // the two above, and always false on the root, which no edge points at.
+    //
+    // A NotInstalled node carrying this is NOT a broken install — the runtime
+    // will not load it and will not fail over its absence — so a health check
+    // or a missing-dependency marker must skip it. Inherited by a required
+    // child of an optional edge: what you need only if you installed something
+    // you did not have to install is not itself required.
+    bool optional = false;
     // What the installed package's signature says about itself — see
     // InstalledPackage::signerDid. Present on any node that resolved to an
     // installed package carrying a usable signature. Sits next to
