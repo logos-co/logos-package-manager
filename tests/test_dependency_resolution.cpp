@@ -34,7 +34,8 @@ protected:
                        const std::string& name,
                        const std::string& type,
                        const std::vector<std::string>& deps = {},
-                       const std::string& version = "1.0.0") {
+                       const std::string& version = "1.0.0",
+                       const std::vector<std::string>& optionalDeps = {}) {
         fs::path dir = parentDir / name;
         fs::create_directories(dir);
 
@@ -43,9 +44,18 @@ protected:
         manifest["type"] = type;
         manifest["version"] = version;
         manifest["dependencies"] = deps;
+        if (!optionalDeps.empty())
+            manifest["optional_dependencies"] = optionalDeps;
 
         std::ofstream mf(dir / "manifest.json");
         mf << manifest.dump(2);
+    }
+
+    static const DependencyTreeNode* childNamed(const DependencyTreeNode& parent,
+                                                const std::string& name) {
+        for (const auto& c : parent.children)
+            if (c.name == name) return &c;
+        return nullptr;
     }
 
     // Helpers mirroring the flat name-list projections that the C ABI and
@@ -944,4 +954,116 @@ TEST_F(DependencyResolutionTest, JsonReportsMismatchWithBothVersions) {
     EXPECT_EQ(dep["installType"], "embedded");
     EXPECT_EQ(dep["requiredVersion"], "^2.0.0");
     EXPECT_EQ(dep["requiredSigner"], "did:jwk:eyJrdHkiOiJPS1AifQ");
+}
+
+// =============================================================================
+// optional_dependencies — the edges an installer may offer but must never
+// treat as part of a complete install.
+// =============================================================================
+
+TEST_F(DependencyResolutionTest, OptionalDependencyAppearsMarked) {
+    writeManifest(modulesDir, "consumer", "core", {"required"}, "1.0.0", {"opt"});
+    writeManifest(modulesDir, "required", "core", {});
+    writeManifest(modulesDir, "opt", "core", {});
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(modulesDir.string());
+
+    auto tree = pm.resolveDependencies("consumer");
+    ASSERT_TRUE(tree);
+    EXPECT_FALSE(tree->optional) << "the root is reached by no edge";
+
+    const auto* req = childNamed(*tree, "required");
+    const auto* opt = childNamed(*tree, "opt");
+    ASSERT_NE(req, nullptr);
+    ASSERT_NE(opt, nullptr);
+    EXPECT_FALSE(req->optional);
+    EXPECT_TRUE(opt->optional);
+}
+
+TEST_F(DependencyResolutionTest, AbsentOptionalDependencyIsMarkedNotBroken) {
+    // The case the feature exists for: the package is complete, and a
+    // missing-dependency marker keying off this tree must not light up.
+    writeManifest(modulesDir, "consumer", "core", {}, "1.0.0", {"never_installed"});
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(modulesDir.string());
+
+    auto tree = pm.resolveDependencies("consumer");
+    ASSERT_TRUE(tree);
+    const auto* opt = childNamed(*tree, "never_installed");
+    ASSERT_NE(opt, nullptr);
+    EXPECT_EQ(opt->status, DependencyStatus::NotInstalled);
+    EXPECT_TRUE(opt->optional)
+        << "an absent optional dependency must be distinguishable from a broken install";
+}
+
+TEST_F(DependencyResolutionTest, OptionalMarkSurvivesFlatten) {
+    // flatten() copies field by field, so the flag has to be copied explicitly
+    // or a flat-list consumer sees an unmarked NotInstalled node.
+    writeManifest(modulesDir, "consumer", "core", {}, "1.0.0", {"never_installed"});
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(modulesDir.string());
+
+    auto tree = pm.resolveDependencies("consumer");
+    ASSERT_TRUE(tree);
+    auto flat = tree->flatten();
+    ASSERT_EQ(flat.size(), 1u);
+    EXPECT_EQ(flat[0].name, "never_installed");
+    EXPECT_TRUE(flat[0].optional);
+}
+
+TEST_F(DependencyResolutionTest, RequiredChildOfAnOptionalEdgeInheritsTheMark) {
+    // `opt` is optional and requires `deep`. You do not have to install `opt`,
+    // so you do not have to install what `opt` requires either.
+    writeManifest(modulesDir, "consumer", "core", {}, "1.0.0", {"opt"});
+    writeManifest(modulesDir, "opt", "core", {"deep"});
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(modulesDir.string());
+
+    auto tree = pm.resolveDependencies("consumer");
+    ASSERT_TRUE(tree);
+    const auto* opt = childNamed(*tree, "opt");
+    ASSERT_NE(opt, nullptr);
+    const auto* deep = childNamed(*opt, "deep");
+    ASSERT_NE(deep, nullptr);
+    EXPECT_EQ(deep->status, DependencyStatus::NotInstalled);
+    EXPECT_TRUE(deep->optional);
+}
+
+TEST_F(DependencyResolutionTest, RequiredEdgeWinsOverOptionalInFlatten) {
+    // Reachable both ways: `shared` is required by `a` and optional for `b`.
+    // One required edge settles it — the flat row must NOT read as optional,
+    // or a health check would skip a package that really is required.
+    writeManifest(modulesDir, "root", "core", {"a", "b"});
+    writeManifest(modulesDir, "a", "core", {"shared"});
+    writeManifest(modulesDir, "b", "core", {}, "1.0.0", {"shared"});
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(modulesDir.string());
+
+    auto tree = pm.resolveDependencies("root");
+    ASSERT_TRUE(tree);
+    auto flat = tree->flatten();
+    const DependencyTreeNode* shared = nullptr;
+    for (const auto& n : flat) if (n.name == "shared") shared = &n;
+    ASSERT_NE(shared, nullptr);
+    EXPECT_FALSE(shared->optional);
+}
+
+TEST_F(DependencyResolutionTest, OptionalDependentIsNotWarnedAboutOnUninstall) {
+    // Reverse edges come from `dependencies` alone: an optional dependent
+    // tolerates its dependency going away, so removing the dependency is not
+    // something it needs to be warned about.
+    writeManifest(modulesDir, "provider", "core", {});
+    writeManifest(modulesDir, "consumer", "core", {}, "1.0.0", {"provider"});
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(modulesDir.string());
+
+    auto tree = pm.resolveDependents("provider");
+    ASSERT_TRUE(tree);
+    EXPECT_TRUE(tree->children.empty());
 }

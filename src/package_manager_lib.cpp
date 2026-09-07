@@ -632,6 +632,9 @@ struct ScanEntry {
     // PackageDependency). The graph walks `.name`; the constraints ride along
     // for consumers that evaluate them.
     std::vector<PackageDependency> dependencies;
+    // Declared but NOT required — never part of "is this install complete".
+    std::vector<PackageDependency> optionalDependencies;
+    std::vector<std::string> interfaceDependencies;
     // The DID the installed manifest.sig names, verified against the key that
     // DID itself carries — see InstalledPackage::signerDid. Display only.
     // nullopt = no usable signature.
@@ -836,8 +839,13 @@ static std::map<std::string, ScanEntry> enumerateManifests(
             // basecamp's missing-dependency marker went green on a module whose
             // dependency was not installed at all. No manifest in the workspace
             // uses the object form today, which is exactly why it went unseen.
-            if (manifest.contains("dependencies") && manifest["dependencies"].is_array()) {
-                for (const auto& d : manifest["dependencies"]) {
+            // One reader for both dependency arrays: they accept identical entry forms,
+            // and a second copy is how they would come to disagree about what an
+            // entry means.
+            auto readDeps = [&](const char* field, std::vector<PackageDependency>& out) {
+                if (!manifest.contains(field) || !manifest[field].is_array())
+                    return;
+                for (const auto& d : manifest[field]) {
                     PackageDependency dep;
                     if (d.is_string()) {
                         dep.name = d.get<std::string>();
@@ -860,37 +868,30 @@ static std::map<std::string, ScanEntry> enumerateManifests(
                                        : d["signer"].dump();
                         }
                     }
-                    // Neither form, or a name that is present but empty: the
-                    // entry declares no edge. SAY SO — dropping it silently is
-                    // the exact failure this loop was just fixed for, one notch
-                    // down. Without this line a hand-edited or build-time
-                    // embedded manifest can lose a dependency with no
-                    // diagnostic anywhere in the system, and the only symptom
-                    // is an uninstall that fails to warn, or a basecamp row
-                    // that shows green while its dependency is absent.
-                    //
-                    // Severity is low BECAUSE the `lgpm install` path cannot
-                    // reach it — logos-package rejects both shapes ahead of us:
-                    // Manifest::fromJson returns nullopt on a non-string /
-                    // non-object entry or an object without a string `name`
-                    // (so Package::load fails outright), and Manifest::validate
-                    // adds "Dependency with empty name" for the rest. What is
-                    // NOT covered is every manifest that bypasses that path:
-                    // an embedded install written at build time, and anything
-                    // edited in place afterwards. Those are exactly the cases
-                    // nobody is watching, which is why this warns rather than
-                    // trusting the upstream gate.
                     if (dep.name.empty()) {
                         std::cerr << "Warning: package '" << name << "' in "
                                   << entry.path().string()
-                                  << " has a malformed dependencies[] entry " << d.dump()
+                                  << " has a malformed " << field << "[] entry " << d.dump()
                                   << " (expected a non-empty name string, or an object with a "
                                   << "string 'name'); the dependency edge is ignored.\n";
                         continue;
                     }
-                    scan.dependencies.push_back(std::move(dep));
+                    out.push_back(std::move(dep));
                 }
+            };
+
+            readDeps("dependencies", scan.dependencies);
+            readDeps("optional_dependencies", scan.optionalDependencies);
+
+            // Names only: an interface names no package, so there is nothing here to
+            // resolve — it is carried for display.
+            if (manifest.contains("interface_dependencies")
+                && manifest["interface_dependencies"].is_array()) {
+                for (const auto& i : manifest["interface_dependencies"])
+                    if (i.is_string() && !i.get<std::string>().empty())
+                        scan.interfaceDependencies.push_back(i.get<std::string>());
             }
+
             scan.manifest = std::move(manifest);
 
             byName[name] = std::move(scan);
@@ -929,6 +930,11 @@ static InstalledPackage scanToInstalledPackage(const ScanEntry& scan)
         if (!d.isSimple())
             p.dependencyConstraints.push_back(d);
     }
+    // Carried whole rather than split into names: nothing walks a name-only
+    // view of these, because they are not part of any graph the installer
+    // completes.
+    p.optionalDependencies = scan.optionalDependencies;
+    p.interfaceDependencies = scan.interfaceDependencies;
 
     const json& m = scan.manifest;
     p.displayName = m.value("display_name", "");
@@ -1023,14 +1029,15 @@ std::optional<DependencyTreeNode> PackageManagerLib::resolveDependencies(const s
     // live on the EDGE, so they must travel with the recursion to be evaluated
     // at the node they constrain.
     std::set<std::string> path;
-    std::function<DependencyTreeNode(const PackageDependency&)> build =
-        [&](const PackageDependency& dep) -> DependencyTreeNode {
+    std::function<DependencyTreeNode(const PackageDependency&, bool)> build =
+        [&](const PackageDependency& dep, bool optional) -> DependencyTreeNode {
         DependencyTreeNode node;
         node.name = dep.name;
         // Recorded before any early return, so a constraint is visible even on
         // an edge whose status is decided without consulting it.
         node.requiredVersion = dep.version;
         node.requiredSigner  = dep.signer;
+        node.optional        = optional;
 
         if (path.count(dep.name)) {
             node.status = DependencyStatus::Cycle;
@@ -1127,16 +1134,26 @@ std::optional<DependencyTreeNode> PackageManagerLib::resolveDependencies(const s
         }
 
         path.insert(dep.name);
-        node.children.reserve(scan.dependencies.size());
+        node.children.reserve(scan.dependencies.size() + scan.optionalDependencies.size());
+        // A required child INHERITS this node's optionality: a package you only
+        // need because you installed something you did not have to install is
+        // not itself required, so an absent one below an optional edge must not
+        // read as a broken install either.
         for (const auto& child : scan.dependencies) {
-            node.children.push_back(build(child));
+            node.children.push_back(build(child, optional));
+        }
+        // Optional edges appear in the tree so a UI can offer them, marked so
+        // nothing reads an absent one as broken.
+        for (const auto& child : scan.optionalDependencies) {
+            node.children.push_back(build(child, /*optional=*/true));
         }
         path.erase(dep.name);
         return node;
     };
 
-    // The root is not pointed at by any edge, so it carries no constraint.
-    return build(PackageDependency(packageName));
+    // The root is not pointed at by any edge, so it carries no constraint and
+    // no optionality.
+    return build(PackageDependency(packageName), /*optional=*/false);
 }
 
 std::optional<DependentTreeNode> PackageManagerLib::resolveDependents(const std::string& packageName)
@@ -1244,6 +1261,13 @@ std::vector<DependencyTreeNode> DependencyTreeNode::flatten() const
                 recorded.requiredVersion = n->requiredVersion;
                 recorded.requiredSigner  = n->requiredSigner;
             }
+            // Optionality collapses the same way, and in the CONSERVATIVE
+            // direction: reachable by any required edge means required, however
+            // many optional edges also reach it. Unlike the status promotion
+            // this is not ranked — one required edge settles it — and it is
+            // deliberately independent of that ranking, since a row can be
+            // promoted to required by an edge whose status is no worse.
+            recorded.optional = recorded.optional && n->optional;
             continue;
         }
         DependencyTreeNode copy;
@@ -1254,6 +1278,9 @@ std::vector<DependencyTreeNode> DependencyTreeNode::flatten() const
         copy.requiredVersion = n->requiredVersion;
         copy.requiredSigner  = n->requiredSigner;
         copy.signerDid       = n->signerDid;
+        // Must travel: dropping it here hands a flat-list consumer an unmarked
+        // NotInstalled node for a package nothing requires.
+        copy.optional        = n->optional;
         out.push_back(std::move(copy));
         for (const auto& c : n->children) queue.push_back(&c);
     }

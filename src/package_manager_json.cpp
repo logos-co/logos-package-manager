@@ -42,6 +42,12 @@ void to_json(nlohmann::json& j, const InstalledPackage& p)
     // or a signer DID, so today's manifests serialise byte-identically.
     if (!p.dependencyConstraints.empty())
         j["dependencyConstraints"] = p.dependencyConstraints;
+    // Same additive rule: emitted only when declared, so every manifest that
+    // predates them serialises byte-identically.
+    if (!p.optionalDependencies.empty())
+        j["optionalDependencies"] = p.optionalDependencies;
+    if (!p.interfaceDependencies.empty())
+        j["interfaceDependencies"] = p.interfaceDependencies;
     // Omitted, not empty-valued, when no usable signature is installed: an
     // absent key is how a reader tells unsigned from signed, which an empty
     // string would not. See InstalledPackage::signerDid.
@@ -70,6 +76,9 @@ void to_json(nlohmann::json& j, const DependencyTreeNode& n)
         j["installType"] = "";
     }
     // Additive: absent unless the parent edge declared one.
+    // Only on optional nodes, so an existing consumer's expected object is
+    // unchanged. A NotInstalled node carrying this is not a broken install.
+    if (n.optional) j["optional"] = true;
     if (n.requiredVersion) j["requiredVersion"] = *n.requiredVersion;
     if (n.requiredSigner)  j["requiredSigner"]  = *n.requiredSigner;
     // Who the installed package's own signature says signed it; absent when
