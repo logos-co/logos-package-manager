@@ -351,3 +351,50 @@ TEST_F(InstallOutParamTest, SkippedInstallReportsTypeFromInstalledManifest) {
     EXPECT_EQ(installedPath, existing.string());
     EXPECT_TRUE(isCore) << "a skipped core install must not report itself as a UI plugin";
 }
+
+TEST_F(InstallOutParamTest, InstalledPackageReportsItsDownloadSource) {
+    const std::string lib = std::string("from_storage_plugin") + kLibExt;
+    auto lgxPath = createPackage("from_storage", lib, true);
+    ASSERT_FALSE(lgxPath.empty());
+
+    auto pm = createPM();
+    std::string errorMsg;
+    std::string result = pm.installPluginFile(lgxPath.string(), errorMsg, false,
+                                              nullptr, nullptr, "logos:zDvZRwzm");
+    ASSERT_FALSE(result.empty()) << errorMsg;
+
+    auto packages = pm.getInstalledPackages();
+    ASSERT_EQ(packages.size(), 1u);
+    EXPECT_EQ(packages[0].source, "logos:zDvZRwzm");
+}
+
+TEST_F(InstallOutParamTest, InstallWithoutSourceReportsEmptySource) {
+    const std::string lib = std::string("no_source_plugin") + kLibExt;
+    auto lgxPath = createPackage("no_source", lib, true);
+    ASSERT_FALSE(lgxPath.empty());
+
+    auto pm = createPM();
+    std::string errorMsg;
+    std::string result = pm.installPluginFile(lgxPath.string(), errorMsg);
+    ASSERT_FALSE(result.empty()) << errorMsg;
+
+    auto packages = pm.getInstalledPackages();
+    ASSERT_EQ(packages.size(), 1u);
+    EXPECT_EQ(packages[0].source, "");
+}
+
+TEST_F(InstallOutParamTest, ReinstallWithoutSourceClearsThePreviousOne) {
+    const std::string lib = std::string("reinstalled_plugin") + kLibExt;
+    auto lgxPath = createPackage("reinstalled", lib, true);
+    ASSERT_FALSE(lgxPath.empty());
+
+    auto pm = createPM();
+    std::string errorMsg;
+    ASSERT_FALSE(pm.installPluginFile(lgxPath.string(), errorMsg, false,
+                                      nullptr, nullptr, "logos:zDvZRwzm").empty()) << errorMsg;
+    ASSERT_FALSE(pm.installPluginFile(lgxPath.string(), errorMsg).empty()) << errorMsg;
+
+    auto packages = pm.getInstalledPackages();
+    ASSERT_EQ(packages.size(), 1u);
+    EXPECT_EQ(packages[0].source, "");
+}
