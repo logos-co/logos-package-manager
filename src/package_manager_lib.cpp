@@ -357,9 +357,13 @@ std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, 
         return {};
     }
 
-    fs::path sourceFilePath = fs::path(installDir) / installedModuleName / "source";
+    fs::path sourceFilePath = fs::path(installDir) / installedModuleName / ".lgpm-source";
     if (source.empty()) {
         fs::remove(sourceFilePath, ec);
+        if (ec) {
+            std::cerr << "Warning: failed to clear the previous download source in "
+                      << sourceFilePath.string() << ": " << ec.message() << "\n";
+        }
     } else {
         std::ofstream sf(sourceFilePath);
         sf << source;
@@ -655,7 +659,7 @@ static InstalledPackage scanToInstalledPackage(const ScanEntry& scan)
         p.hashes.root = m["hashes"].value("root", "");
     }
 
-    std::ifstream sf(fs::path(scan.installDir) / "source");
+    std::ifstream sf(fs::path(scan.installDir) / ".lgpm-source");
     if (sf.is_open()) {
         std::getline(sf, p.source);
     }
