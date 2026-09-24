@@ -279,7 +279,8 @@ std::vector<std::string> PackageManagerLib::allDirectories() const
 std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, std::string& errorMsg,
                                                   bool skipIfNotNewerVersion,
                                                   std::string* installedPluginPath,
-                                                  bool* isCoreModuleOut)
+                                                  bool* isCoreModuleOut,
+                                                  const std::string& source)
 {
     fs::path sourcePath(pluginPath);
     if (!fs::exists(sourcePath) || !fs::is_regular_file(sourcePath)) {
@@ -498,6 +499,22 @@ std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, 
     if (!copyLibraryFromExtracted(tempDir, installDir, isCoreModule, installedModuleName, errorMsg)) {
         removeTreeQuietly(tempDir);
         return {};
+    }
+
+    fs::path sourceFilePath = fs::path(installDir) / installedModuleName / ".lgpm-source";
+    if (source.empty()) {
+        fs::remove(sourceFilePath, ec);
+        if (ec) {
+            std::cerr << "Warning: failed to clear the previous download source in "
+                      << sourceFilePath.string() << ": " << ec.message() << "\n";
+        }
+    } else {
+        std::ofstream sf(sourceFilePath);
+        sf << source;
+        if (!sf.good()) {
+            std::cerr << "Warning: failed to record the download source in "
+                      << sourceFilePath.string() << "\n";
+        }
     }
 
     // Determine the path we report for what was just installed. This is the
@@ -948,6 +965,11 @@ static InstalledPackage scanToInstalledPackage(const ScanEntry& scan)
 
     if (m.contains("hashes") && m["hashes"].is_object()) {
         p.hashes.root = m["hashes"].value("root", "");
+    }
+
+    std::ifstream sf(fs::path(scan.installDir) / ".lgpm-source");
+    if (sf.is_open()) {
+        std::getline(sf, p.source);
     }
 
     return p;

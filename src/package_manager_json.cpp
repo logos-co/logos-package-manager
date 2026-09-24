@@ -57,6 +57,7 @@ void to_json(nlohmann::json& j, const InstalledPackage& p)
     j["installType"]  = installTypeToString(p.installType);
     j["installDir"]   = p.installDir;
     j["mainFilePath"] = p.mainFilePath;
+    j["source"]       = p.source;
 }
 
 void to_json(nlohmann::json& j, const DependencyTreeNode& n)

@@ -186,6 +186,7 @@ struct InstalledPackage {
     InstallType installType;
     std::string installDir;
     std::string mainFilePath;
+    std::string source;                     // download source; empty when unknown
 };
 
 // A node in the forward dependency tree produced by resolveDependencies.
@@ -307,10 +308,14 @@ public:
     // backend library, so its manifest carries an empty "main").
     //
     // If isCoreModule is non-null, receives whether the module type is "core".
+    //
+    // A non-empty `source` (where the .lgx was downloaded from) is recorded
+    // in the installed module directory and reported by the scans.
     std::string installPluginFile(const std::string& pluginPath, std::string& errorMsg,
                                   bool skipIfNotNewerVersion = false,
                                   std::string* installedPluginPath = nullptr,
-                                  bool* isCoreModule = nullptr);
+                                  bool* isCoreModule = nullptr,
+                                  const std::string& source = "");
 
     // Decide what installPluginFile() reports for a package that has just
     // been copied into `moduleDir` (= <installRoot>/<moduleName>). `variants`
