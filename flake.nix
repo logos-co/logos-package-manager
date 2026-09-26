@@ -2,9 +2,9 @@
   description = "Logos Package Manager - Local package management library and CLI";
 
   inputs = {
-    logos-nix.url = "github:logos-co/logos-nix";
+    logos-nix.url = "github:logos-co/logos-nix/feat/standalone-apps";
     nixpkgs.follows = "logos-nix/nixpkgs";
-    logos-package.url = "github:logos-co/logos-package";
+    logos-package.url = "github:logos-co/logos-package/feat/standalone-apps";
     nix-bundle-dir.url = "github:logos-co/nix-bundle-dir";
     nix-bundle-appimage.url = "github:logos-co/nix-bundle-appimage";
   };
@@ -42,7 +42,13 @@
       # Adds the "x86_64-windows" pseudo-system. PACKAGES only -- `checks` cannot
       # run (ctest would have to execute PE binaries on the Linux build host)
       # and a cross devShell offers no way to run what it produces.
-      forAllTargets = logos-nix.lib.forAllTargets;
+      forAllTargets = f: logos-nix.lib.forAllTargets f // {
+        # The library only: an Android app embeds it through liblogos.
+        aarch64-android = f {
+          system = "aarch64-android";
+          inherit (logos-nix.lib.mobileTargets.aarch64-android) pkgs;
+        };
+      };
     in
     {
       packages = forAllTargets ({ pkgs, system }:
@@ -59,6 +65,7 @@
           # Verified end to end: lgx.exe round-trips a package on a Windows box
           # with no Nix installed.
           isWindows = pkgs.stdenv.hostPlatform.isWindows;
+          isAndroid = pkgs.stdenv.hostPlatform.isAndroid;
 
           # Common configuration (dev, default)
           common = import ./nix/default.nix { inherit pkgs logosPackageLib; };
@@ -93,10 +100,10 @@
           cli = cli;
           cli-portable = cliPortable;
 
-        } // pkgs.lib.optionalAttrs (!isWindows) {
+        } // pkgs.lib.optionalAttrs (!isWindows && !isAndroid) {
           # Bundle outputs
           cli-bundle-dir = dirBundler cliPortable;
-        } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+        } // pkgs.lib.optionalAttrs (pkgs.stdenv.isLinux && !isAndroid) {
           cli-appimage = nix-bundle-appimage.lib.${system}.mkAppImage {
             drv = cliPortable;
             name = "lgpm";
@@ -104,7 +111,7 @@
             desktopFile = ./assets/lgpm.desktop;
             icon = ./assets/lgpm.png;
           };
-        } // pkgs.lib.optionalAttrs (!isWindows) {
+        } // pkgs.lib.optionalAttrs (!isWindows && !isAndroid) {
           # Tests
           tests = import ./nix/tests.nix { inherit pkgs common src logosPackageLib; };
         } // {
