@@ -2,9 +2,9 @@
   description = "Logos Package Manager - Local package management library and CLI";
 
   inputs = {
-    logos-nix.url = "github:logos-co/logos-nix";
+    logos-nix.url = "github:logos-co/logos-nix/feat/standalone-apps";
     nixpkgs.follows = "logos-nix/nixpkgs";
-    logos-package.url = "github:logos-co/logos-package";
+    logos-package.url = "github:logos-co/logos-package/feat/standalone-apps";
     nix-bundle-dir.url = "github:logos-co/nix-bundle-dir";
     nix-bundle-appimage.url = "github:logos-co/nix-bundle-appimage";
   };
