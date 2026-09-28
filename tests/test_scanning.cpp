@@ -124,6 +124,35 @@ TEST_F(ScanningTest, GetInstalledPackagesReturnsAll) {
     EXPECT_EQ(packages.size(), 3u);
 }
 
+TEST_F(ScanningTest, UserCopyOverridesEmbeddedAndRemovingItRevealsEmbedded) {
+    createFakeModule("storage_module", "core", "1.0.0");
+
+    const fs::path userDir = tempDir / "user";
+    const fs::path userPackage = userDir / "storage_module";
+    fs::create_directories(userPackage);
+    json manifest = {{"name", "storage_module"}, {"type", "core"},
+                     {"version", "2.0.0"}};
+    std::ofstream(userPackage / "manifest.json") << manifest.dump(2);
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(tempDir.string());
+    pm.setUserModulesDirectory(userDir.string());
+
+    auto packages = pm.getInstalledModules();
+    ASSERT_EQ(packages.size(), 1u);
+    EXPECT_EQ(packages[0].version, "2.0.0");
+    EXPECT_EQ(packages[0].installType, InstallType::User);
+
+    auto removed = pm.uninstallPackage("storage_module");
+    ASSERT_TRUE(removed.success) << removed.errorMsg;
+    EXPECT_TRUE(fs::exists(tempDir / "storage_module" / "manifest.json"));
+
+    packages = pm.getInstalledModules();
+    ASSERT_EQ(packages.size(), 1u);
+    EXPECT_EQ(packages[0].version, "1.0.0");
+    EXPECT_EQ(packages[0].installType, InstallType::Embedded);
+}
+
 TEST_F(ScanningTest, ScannedModulesContainManifestFields) {
     createFakeModule("test_mod", "core", "2.1.0");
 
