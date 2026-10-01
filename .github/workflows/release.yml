@@ -16,6 +16,10 @@ name: Build & Release
 #                             Homebrew handles casks, wrap in a tar.gz.
 #   Windows (x86_64):         cross-build cli-portable on a Linux runner and
 #                             zip its bin/ (lgpm.exe beside every DLL it needs).
+#
+# Nix and the binary cache come from logos-co/setup-nix-cache-action. The
+# Logos Attic caches are public to read, so every job (and fork PRs) pulls from
+# them; pushing needs ATTIC_TOKEN_CI and is skipped while it is unset.
 
 on:
   push:
@@ -39,15 +43,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: cachix/install-nix-action@v27
+      - uses: logos-co/setup-nix-cache-action@v1
         with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
-
-      - uses: cachix/cachix-action@v15
-        with:
-          name: logos-co
-          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+          attic-token-ci: ${{ secrets.ATTIC_TOKEN_CI }}
 
       - name: Build cli-appimage
         run: nix build .#cli-appimage -L
@@ -79,12 +77,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: DeterminateSystems/nix-installer-action@main
-
-      - uses: cachix/cachix-action@v15
+      - uses: logos-co/setup-nix-cache-action@v1
         with:
-          name: logos-co
-          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+          attic-token-ci: ${{ secrets.ATTIC_TOKEN_CI }}
 
       - name: Build cli-bundle-dir
         run: nix build .#cli-bundle-dir -L
@@ -122,16 +117,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: logos-co/setup-nix-cache-action@v1
         with:
-          extra-conf: |
-            extra-substituters = https://cache.nix.logos.co/public
-            extra-trusted-public-keys = public:Z1wyVBEx8PHbXujYB52Mysv9Rd8rWIhyQ3bQyef9yy4=
-
-      - uses: cachix/cachix-action@v15
-        with:
-          name: logos-co
-          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+          attic-token-ci: ${{ secrets.ATTIC_TOKEN_CI }}
 
       - name: Build cli-portable for Windows
         run: nix build .#packages.x86_64-windows.cli-portable -L
