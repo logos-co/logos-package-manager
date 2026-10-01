@@ -14,6 +14,8 @@ name: Build & Release
 #   macOS (aarch64):          build the portable cli-bundle-dir (bin/ + lib/),
 #                             strip the Gatekeeper quarantine flag the way
 #                             Homebrew handles casks, wrap in a tar.gz.
+#   Windows (x86_64):         cross-build cli-portable on a Linux runner and
+#                             zip its bin/ (lgpm.exe beside every DLL it needs).
 
 on:
   push:
@@ -112,9 +114,55 @@ jobs:
           name: macos-aarch64-darwin
           path: lgpm-aarch64-macos.tar.gz
 
+  # A CROSS build on a Linux runner: nix does not run on Windows. Executing the
+  # result on real Windows is doctests.yml's logos-windows-ci leg.
+  build-windows-bundle:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@main
+        with:
+          extra-conf: |
+            extra-substituters = https://cache.nix.logos.co/public
+            extra-trusted-public-keys = public:Z1wyVBEx8PHbXujYB52Mysv9Rd8rWIhyQ3bQyef9yy4=
+
+      - uses: cachix/cachix-action@v15
+        with:
+          name: logos-co
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
+      - name: Build cli-portable for Windows
+        run: nix build .#packages.x86_64-windows.cli-portable -L
+
+      # No bundler needed: nix/cli.nix already puts every runtime DLL in bin/
+      # next to lgpm.exe, which is where Windows looks first.
+      - name: Package bin/ as a zip
+        run: |
+          set -euo pipefail
+          dst="lgpm-x86_64-windows"
+          rm -rf "$dst" && mkdir -p "$dst"
+          # -L dereferences: the DLLs are store symlinks, and a zip of dangling
+          # links extracts to a tree that cannot start.
+          cp -rL result/bin "$dst/"
+          chmod -R u+w "$dst"
+          [ -f "$dst/bin/lgpm.exe" ] || { echo "::error::no lgpm.exe in the bundle"; exit 1; }
+          staged=$(find "$dst" -type f | wc -l | tr -d ' ')
+          zip -qr "$dst.zip" "$dst"
+          zipped=$(unzip -l "$dst.zip" | tail -1 | awk '{print $2}')
+          echo "bundle $staged file(s) -> zip $zipped entr(ies)"
+          [ "$zipped" -ge "$staged" ] || { echo "::error::zip is missing files"; exit 1; }
+          unzip -l "$dst.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: lgpm-x86_64-windows.zip
+
   release:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/release/')
-    needs: [build-appimage, build-macos-bundle]
+    needs: [build-appimage, build-macos-bundle, build-windows-bundle]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -133,6 +181,11 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: macos-aarch64-darwin
+          path: artifacts/
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-x86_64
           path: artifacts/
 
       - name: Generate tag
@@ -177,5 +230,22 @@ jobs:
             ```
 
             Now `lgpm` runs from anywhere.
+
+            ### Windows (x86_64)
+
+            > **Download from PowerShell with `curl.exe` — _not_ a web browser.** A browser marks the zip as downloaded from the internet, Explorer's *Extract All* copies that mark onto every file, and Windows may then block these unsigned binaries. If you already used a browser, run `Unblock-File lgpm-x86_64-windows.zip` before extracting.
+
+            ```powershell
+            curl.exe -fLO https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.tag }}/lgpm-x86_64-windows.zip
+            Expand-Archive lgpm-x86_64-windows.zip -DestinationPath "$env:LOCALAPPDATA\Programs"
+            # keep the folder together (lgpm.exe loads its DLLs from its own
+            # directory) and put its bin\ on your user PATH:
+            $bin = "$env:LOCALAPPDATA\Programs\lgpm-x86_64-windows\bin"
+            [Environment]::SetEnvironmentVariable('Path', "$bin;" + [Environment]::GetEnvironmentVariable('Path', 'User'), 'User')
+            $env:Path = "$bin;$env:Path"
+            ```
+
+            Now `lgpm` runs from anywhere, in this window and in new ones.
           files: |
             artifacts/*.tar.gz
+            artifacts/*-windows.zip
