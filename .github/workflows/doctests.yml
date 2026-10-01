@@ -46,14 +46,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
-
-      - name: Setup Cachix
-        uses: cachix/cachix-action@v15
+      - uses: logos-co/setup-nix-cache-action@v1
         with:
-          name: logos-co
-          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+          attic-token-ci: ${{ secrets.ATTIC_TOKEN_CI }}
 
       # Resolve the commit under test. For pull requests this is the PR's head
       # commit (not the synthetic merge commit); for pushes it's the pushed
