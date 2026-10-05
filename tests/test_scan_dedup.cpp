@@ -42,7 +42,7 @@ protected:
     }
 };
 
-TEST_F(ScanDedupTest, UserWinsOverEmbeddedForSameName) {
+TEST_F(ScanDedupTest, NewerUserCopyWinsOverEmbedded) {
     writeManifest(embeddedDir, "widget", "1.0.0");
     writeManifest(userDir,     "widget", "2.0.0");
 
@@ -91,4 +91,51 @@ TEST_F(ScanDedupTest, DedupWorksForGetInstalledPackages) {
     ASSERT_EQ(pkgs.size(), 1u);
     EXPECT_EQ(pkgs[0].version, "2.0.0");
     EXPECT_EQ(pkgs[0].installType, InstallType::User);
+}
+
+// An app upgrade can ship a newer embedded copy than the one the user
+// installed; the older user copy must not shadow it.
+TEST_F(ScanDedupTest, NewerEmbeddedCopyWinsOverOlderUserCopy) {
+    writeManifest(embeddedDir, "widget", "2.0.0");
+    writeManifest(userDir,     "widget", "1.0.0");
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(embeddedDir.string());
+    pm.setUserModulesDirectory(userDir.string());
+
+    auto modules = pm.getInstalledModules();
+    ASSERT_EQ(modules.size(), 1u);
+    EXPECT_EQ(modules[0].version, "2.0.0");
+    EXPECT_EQ(modules[0].installType, InstallType::Embedded);
+}
+
+TEST_F(ScanDedupTest, UserCopyWinsATie) {
+    writeManifest(embeddedDir, "widget", "1.0.0");
+    writeManifest(userDir,     "widget", "1.0.0");
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(embeddedDir.string());
+    pm.setUserModulesDirectory(userDir.string());
+
+    auto modules = pm.getInstalledModules();
+    ASSERT_EQ(modules.size(), 1u);
+    EXPECT_EQ(modules[0].installType, InstallType::User);
+}
+
+// liblogos registers every modules dir as embedded, in the frontend's order;
+// that order must not decide which version loads.
+TEST_F(ScanDedupTest, NewestWinsAcrossEmbeddedDirsWhateverTheirOrder) {
+    const fs::path second = embeddedDir.parent_path() / "embedded2";
+    fs::create_directories(second);
+    writeManifest(embeddedDir, "widget", "3.0.2");
+    writeManifest(second,      "widget", "3.0.0");
+
+    PackageManagerLib pm;
+    pm.setEmbeddedModulesDirectory(embeddedDir.string());
+    pm.addEmbeddedModulesDirectory(second.string());
+
+    auto modules = pm.getInstalledModules();
+    ASSERT_EQ(modules.size(), 1u);
+    EXPECT_EQ(modules[0].version, "3.0.2");
+    EXPECT_EQ(fs::path(modules[0].installDir), embeddedDir / "widget");
 }
