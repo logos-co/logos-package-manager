@@ -13,7 +13,8 @@ enum class SignaturePolicy {
 
 // Where a scanned package lives. "embedded" is a read-only, shipped-with-app
 // directory; "user" is the writable directory new installs go to. When the
-// same package name exists in both, user wins at scan time.
+// same package name exists in both, the newer version wins at scan time, and
+// the user copy on a tie.
 enum class InstallType {
     Embedded,
     User,
@@ -345,9 +346,9 @@ public:
     // the required QML entry point and `mainFilePath` is backend-only
     // metadata that may be empty.
     //
-    // When the same package name appears in both an embedded and the user
-    // directory, the user-directory copy wins and the embedded entry is
-    // dropped from the result.
+    // When the same package name appears in more than one directory, the
+    // newest version wins (the user copy on a tie) and the others are dropped
+    // from the result.
     //
     // Serialization to JSON is the caller's responsibility — see
     // package_manager_json.h for to_json hooks that match the legacy wire

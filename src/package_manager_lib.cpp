@@ -739,8 +739,9 @@ static std::string readInstalledVariant(const fs::path& moduleDir)
     return readSidecarLine(moduleDir, "variant");
 }
 
-// Enumerate all manifests under the given embedded + user dir lists,
-// deduping by package name with user-dir entries winning over embedded ones.
+// Enumerate all manifests under the given embedded + user dir lists, keeping
+// the newest version of each package name. A tie goes to the later directory,
+// and user dirs are scanned after embedded ones.
 // `types` filter selects by manifest.type; empty = no filter.
 static std::map<std::string, ScanEntry> enumerateManifests(
     const std::vector<std::string>& embeddedDirs,
@@ -802,8 +803,11 @@ static std::map<std::string, ScanEntry> enumerateManifests(
                 if (!matches) continue;
             }
 
-            // User always wins — later scans for the same name clobber earlier ones.
-            // Since we scan embedded first, then user, the map ends with the correct entry.
+            // An older copy never shadows a newer one, wherever each lives.
+            if (auto it = byName.find(name); it != byName.end()
+                && logos::semver::compare(it->second.version, manifest.value("version", "")) > 0)
+                continue;
+
             ScanEntry scan;
             scan.name = name;
             scan.type = moduleType;
