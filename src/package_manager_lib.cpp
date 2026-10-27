@@ -154,12 +154,12 @@ static std::string joinStrings(const std::vector<std::string>& items, const char
 // the staged copy: an install that would fail it at launch fails here instead.
 static bool verifyStagedTree(const fs::path& variantDir, std::string& errorMsg) {
     std::ifstream mf(variantDir / "manifest.json", std::ios::binary);
-    const std::string manifest((std::istreambuf_iterator<char>(mf)),
-                               std::istreambuf_iterator<char>());
-    if (!mf.good() && !mf.eof()) {
+    if (!mf.is_open()) {
         errorMsg = "Failed to read the extracted manifest.json in " + variantDir.string();
         return false;
     }
+    const std::string manifest((std::istreambuf_iterator<char>(mf)),
+                               std::istreambuf_iterator<char>());
     const std::string variant = variantDir.filename().string();
     const lgx_integrity_t integrity = lgx_verify_installed_tree(
         variantDir.string().c_str(), manifest.data(), manifest.size(), variant.c_str());
@@ -477,7 +477,12 @@ std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, 
         }
     }
 
-    if (!variantDir.empty() && !verifyStagedTree(variantDir, errorMsg)) {
+    if (variantDir.empty()) {
+        errorMsg = "Extracted package has no variant directory for this platform";
+        removeTreeQuietly(tempDir);
+        return {};
+    }
+    if (!verifyStagedTree(variantDir, errorMsg)) {
         removeTreeQuietly(tempDir);
         return {};
     }
@@ -1608,13 +1613,20 @@ bool PackageManagerLib::extractLgxPackage(const std::string& lgxPath, const std:
     // installed-tree check skips them (INSTALL_SIDECAR_FILES). A payload file
     // of the same name would be overwritten, and the install could never pass
     // that check. Any left by an earlier extraction here are cleared first, so
-    // what is found afterwards came from this package.
+    // what is found afterwards came from this package. Checked before the
+    // installer writes its own below.
     static constexpr const char* kInstallerFiles[] = {
         "manifest.json", "manifest.sig", "variant", ".lgpm-source"};
     const fs::path variantOutputDir = fs::path(outputDir) / matchedVariant;
     for (const char* name : kInstallerFiles) {
         std::error_code rmEc;
         fs::remove(variantOutputDir / name, rmEc);
+        if (rmEc) {
+            errorMsg = "Failed to clear " + (variantOutputDir / name).string()
+                     + " left by an earlier extraction: " + rmEc.message();
+            lgx_free_package(pkg);
+            return false;
+        }
     }
 
     lgx_result_t result = lgx_extract(pkg, matchedVariant.c_str(), outputDir.c_str());
@@ -1626,7 +1638,15 @@ bool PackageManagerLib::extractLgxPackage(const std::string& lgxPath, const std:
     }
 
     for (const char* reserved : kInstallerFiles) {
-        if (fs::exists(variantOutputDir / reserved)) {
+        std::error_code existsEc;
+        const bool shipped = fs::exists(variantOutputDir / reserved, existsEc);
+        if (existsEc) {
+            errorMsg = "Failed to inspect " + (variantOutputDir / reserved).string() + ": "
+                     + existsEc.message();
+            lgx_free_package(pkg);
+            return false;
+        }
+        if (shipped) {
             errorMsg = std::string("Package ships variants/") + matchedVariant + "/" + reserved
                      + ", a file name the installer reserves";
             lgx_free_package(pkg);
