@@ -542,6 +542,20 @@ TEST_F(SignatureTest, ExtractingTwiceIntoTheSameDirectorySucceeds) {
     EXPECT_TRUE(pm.extractLgxPackage(lgxPath.string(), out.string(), errorMsg)) << errorMsg;
 }
 
+// A leftover the extractor can't clear is reported as such, not blamed on the
+// package as a reserved name it shipped.
+TEST_F(SignatureTest, AnUnclearableLeftoverIsNotBlamedOnThePackage) {
+    auto lgxPath = createUnsignedPackage("leftover");
+    ASSERT_FALSE(lgxPath.empty());
+    const fs::path out = tempDir / "leftover_out";
+    fs::create_directories(out / currentVariant() / "manifest.json" / "inner");
+
+    auto pm = createPM();
+    std::string errorMsg;
+    EXPECT_FALSE(pm.extractLgxPackage(lgxPath.string(), out.string(), errorMsg));
+    EXPECT_NE(errorMsg.find("Failed to clear"), std::string::npos) << errorMsg;
+}
+
 // A signature left by an earlier extraction must not describe a package that
 // carries none.
 TEST_F(SignatureTest, ReExtractingAnUnsignedPackageLeavesNoStaleSignature) {
