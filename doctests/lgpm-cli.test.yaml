@@ -22,7 +22,7 @@ what_you_learn:
   - How `--json` turns every command into machine-readable output
 
 prerequisites:
-  - "**Nix** with flakes enabled — used to build the `lgpm` CLI."
+  - "**Nix** with flakes enabled — used to build the `lgpm` and `lgx` CLIs."
   - "A Linux or macOS machine (the package variants below cover both)."
 
 sections:
@@ -50,6 +50,14 @@ sections:
         expect_contains:
           - "lgpm version"
         check_file: "lgpm/bin/lgpm"
+
+      - title: "Build the lgx packaging CLI"
+        text: |
+          [`lgx`](https://github.com/logos-co/logos-package) is the packaging
+          tool. The packing steps below use it to add each payload and stamp the
+          package's content hashes.
+        run: "nix build 'github:logos-co/logos-package#lgx' -o lgx"
+        check_file: "lgx/bin/lgx"
 
   - title: "Detect the platform variant"
     step: true
@@ -92,13 +100,17 @@ sections:
   - title: "Create the core module package"
     step: true
     text: |
-      An `.lgx` file is just a **gzipped tar archive** with a `manifest.json` at
-      its root and the payload under `variants/<platform>/`. `lgpm` reads the
+      An `.lgx` file is a **gzipped tar archive** with a `manifest.json` at its
+      root and the payload under `variants/<platform>/`. `lgpm` reads the
       manifest to learn the package's name, version, type, dependencies, and entry
-      point — so a hand-built tarball is a perfectly valid package. (In a real
-      project [`nix-bundle-lgx`](https://github.com/logos-co/nix-bundle-lgx)
-      generates these from a module's `metadata.json`; here we write the manifest
-      by hand to keep the focus on `lgpm`.)
+      point. The manifest must also carry **content hashes** over the payload:
+      `lgpm` refuses a package without them, or whose files don't match them,
+      whatever its signature policy. So we hand-write the manifest, pack it with
+      an empty `variants/`, and let `lgx add` inject the payload and stamp the
+      hashes. (In a real project
+      [`nix-bundle-lgx`](https://github.com/logos-co/nix-bundle-lgx) generates
+      the whole package from a module's `metadata.json`; here we write the
+      manifest by hand to keep the focus on `lgpm`.)
 
       We start with a tiny **core module** called `greeter`. The payload is a stub —
       `lgpm` installs and indexes packages by their manifest; it does not load the
@@ -130,21 +142,27 @@ sections:
         run: |
           VARIANT="$(cat variant)"
           sed -i.bak "s/PLACEHOLDER_VARIANT/$VARIANT/" build/greeter/manifest.json && rm -f build/greeter/manifest.json.bak
-          mkdir -p "build/greeter/variants/$VARIANT"
-          echo 'stub library' > "build/greeter/variants/$VARIANT/greeter.{ext}"
+          mkdir -p build/greeter/variants build/greeter/payload
+          echo 'stub library' > "build/greeter/payload/greeter.{ext}"
           tar --format=ustar -C build/greeter -czf greeter.lgx manifest.json variants
+          ./lgx/bin/lgx{exe} add greeter.lgx --variant "$VARIANT" --files "build/greeter/payload/greeter.{ext}" -y
         code_block: |
           VARIANT="$(cat variant)"
 
           # Point main[<variant>] at the real variant name
           sed -i "s/PLACEHOLDER_VARIANT/$VARIANT/" build/greeter/manifest.json
 
-          # Payload goes under variants/<platform>/ (e.g. variants/linux-x86_64-dev/)
-          mkdir -p "build/greeter/variants/$VARIANT"
-          echo 'stub library' > "build/greeter/variants/$VARIANT/greeter.so"  # .dylib on macOS
+          # The payload: a stub library
+          mkdir -p build/greeter/variants build/greeter/payload
+          echo 'stub library' > build/greeter/payload/greeter.so  # .dylib on macOS
 
-          # An .lgx is a gzipped tar of the manifest + the variants/ tree
+          # Pack the manifest with an empty variants/ (plain ustar: the LGX
+          # reader doesn't speak pax headers)...
           tar --format=ustar -C build/greeter -czf greeter.lgx manifest.json variants
+
+          # ...then add the payload under variants/<platform>/ (e.g.
+          # variants/linux-x86_64-dev/); lgx stamps the content hashes
+          ./lgx/bin/lgx add greeter.lgx --variant "$VARIANT" --files build/greeter/payload/greeter.so -y
         post_text: "Confirm the archive layout:"
         extra_run:
           run: "tar -tzf greeter.lgx"
@@ -184,15 +202,17 @@ sections:
         run: |
           VARIANT="$(cat variant)"
           sed -i.bak "s/PLACEHOLDER_VARIANT/$VARIANT/" build/greeter_ui/manifest.json && rm -f build/greeter_ui/manifest.json.bak
-          mkdir -p "build/greeter_ui/variants/$VARIANT"
-          echo 'stub library' > "build/greeter_ui/variants/$VARIANT/greeter_ui.{ext}"
+          mkdir -p build/greeter_ui/variants build/greeter_ui/payload
+          echo 'stub library' > "build/greeter_ui/payload/greeter_ui.{ext}"
           tar --format=ustar -C build/greeter_ui -czf greeter_ui.lgx manifest.json variants
+          ./lgx/bin/lgx{exe} add greeter_ui.lgx --variant "$VARIANT" --files "build/greeter_ui/payload/greeter_ui.{ext}" -y
         code_block: |
           VARIANT="$(cat variant)"
           sed -i "s/PLACEHOLDER_VARIANT/$VARIANT/" build/greeter_ui/manifest.json
-          mkdir -p "build/greeter_ui/variants/$VARIANT"
-          echo 'stub library' > "build/greeter_ui/variants/$VARIANT/greeter_ui.so"
+          mkdir -p build/greeter_ui/variants build/greeter_ui/payload
+          echo 'stub library' > build/greeter_ui/payload/greeter_ui.so
           tar --format=ustar -C build/greeter_ui -czf greeter_ui.lgx manifest.json variants
+          ./lgx/bin/lgx add greeter_ui.lgx --variant "$VARIANT" --files build/greeter_ui/payload/greeter_ui.so -y
 
   - title: "Install the packages"
     step: true
@@ -200,7 +220,8 @@ sections:
       `lgpm` installs into the directories you give it — `--modules-dir` and
       `--ui-plugins-dir` — and later scans both. Pass both on every command so it
       sees the whole set. Our hand-built packages are unsigned, so we add
-      `--allow-unsigned`.
+      `--allow-unsigned`. That relaxes only the signature requirement: the
+      content hashes are checked either way.
     steps:
       - title: "Install the core module"
         run: "./cli/bin/lgpm{exe} --modules-dir ./modules --ui-plugins-dir ./plugins --allow-unsigned install --file ./greeter.lgx"

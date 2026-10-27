@@ -2,6 +2,7 @@
 #include "package_manager_lib.h"
 #include "test_support.h"
 #include <lgx.h>
+#include <zlib.h>
 #include <filesystem>
 #include <fstream>
 
@@ -53,7 +54,6 @@ protected:
      * Returns the path to the .lgx file.
      */
     fs::path createUnsignedPackage(const std::string& name,
-                                    const std::string& type = "core",
                                     const std::string& version = "1.0.0") {
         fs::path lgxPath = tempDir / (name + ".lgx");
         fs::path contentDir = tempDir / (name + "_content");
@@ -70,18 +70,6 @@ protected:
         {
             std::ofstream f(contentDir / libName);
             f << "fake library content";
-        }
-
-        // Create a manifest.json inside the content directory
-        {
-            std::ofstream mf(contentDir / "manifest.json");
-            mf << "{\n"
-               << "  \"name\": \"" << name << "\",\n"
-               << "  \"version\": \"" << version << "\",\n"
-               << "  \"type\": \"" << type << "\",\n"
-               << "  \"description\": \"Test package " << name << "\",\n"
-               << "  \"category\": \"test\"\n"
-               << "}";
         }
 
         // Create LGX package
@@ -133,15 +121,6 @@ protected:
             std::ofstream f(contentDir / libName);
             f << "fake library content";
         }
-        {
-            std::ofstream mf(contentDir / "manifest.json");
-            mf << "{\n"
-               << "  \"name\": \"" << name << "\",\n"
-               << "  \"version\": \"1.0.0\",\n"
-               << "  \"type\": \"core\",\n"
-               << "  \"category\": \"test\"\n"
-               << "}";
-        }
 
         lgx_result_t res = lgx_create(lgxPath.string().c_str(), name.c_str());
         if (!res.success) return {};
@@ -189,6 +168,34 @@ protected:
         std::string did;
         std::getline(f, did);
         return did;
+    }
+
+    /**
+     * Change payload bytes inside a saved .lgx without touching its manifest,
+     * so its hashes no longer match. File content sits uncompressed in the
+     * tar, and a same-length edit leaves every tar header valid.
+     */
+    bool corruptPayload(const fs::path& lgxPath) {
+        std::string bytes;
+        {
+            gzFile in = gzopen(lgxPath.string().c_str(), "rb");
+            if (!in) return false;
+            char buf[16384];
+            int n;
+            while ((n = gzread(in, buf, sizeof buf)) > 0) bytes.append(buf, n);
+            gzclose(in);
+            if (n < 0) return false;
+        }
+        const std::string from = "fake library content";
+        const auto at = bytes.find(from);
+        if (at == std::string::npos) return false;
+        bytes.replace(at, from.size(), "evil library content");
+
+        gzFile out = gzopen(lgxPath.string().c_str(), "wb");
+        if (!out) return false;
+        const bool written = gzwrite(out, bytes.data(), static_cast<unsigned>(bytes.size()))
+                             == static_cast<int>(bytes.size());
+        return gzclose(out) == Z_OK && written;
     }
 
     /**
@@ -475,6 +482,109 @@ TEST_F(SignatureTest, InstallCreatesModuleDirectory) {
     EXPECT_TRUE(fs::is_directory(result));
 }
 
+// Integrity is not a trust question: NONE (lgpm --allow-unsigned) used to skip
+// the hash check along with the signature check.
+TEST_F(SignatureTest, ADamagedPackageIsRejectedUnderEveryPolicy) {
+    for (SignaturePolicy policy : {SignaturePolicy::NONE, SignaturePolicy::WARN,
+                                   SignaturePolicy::REQUIRE}) {
+        const std::string name = "damaged_" + std::to_string(static_cast<int>(policy));
+        auto lgxPath = createUnsignedPackage(name);
+        ASSERT_FALSE(lgxPath.empty());
+        ASSERT_TRUE(corruptPayload(lgxPath));
+
+        auto pm = createPM(policy);
+        std::string errorMsg;
+        std::string result = pm.installPluginFile(lgxPath.string(), errorMsg);
+
+        EXPECT_TRUE(result.empty()) << "policy " << static_cast<int>(policy);
+        EXPECT_NE(errorMsg.find("Package validation failed"), std::string::npos) << errorMsg;
+        EXPECT_FALSE(fs::exists(modulesDir / name)) << "policy " << static_cast<int>(policy);
+        EXPECT_FALSE(fs::exists(uiPluginsDir / name)) << "policy " << static_cast<int>(policy);
+    }
+}
+
+// The installer writes manifest.json beside the payload. A payload shipping its
+// own would be overwritten and could never pass the load-time check, so it is
+// refused by name rather than reported as damaged.
+TEST_F(SignatureTest, APayloadUsingAnInstallerFileNameIsRefused) {
+    const fs::path lgxPath = tempDir / "reserved.lgx";
+    const fs::path contentDir = tempDir / "reserved_content";
+    fs::create_directories(contentDir);
+    const std::string libName = "reserved_plugin.so";
+    { std::ofstream f(contentDir / libName); f << "fake library content"; }
+    { std::ofstream f(contentDir / "manifest.json"); f << "{}"; }
+
+    ASSERT_TRUE(lgx_create(lgxPath.string().c_str(), "reserved").success);
+    lgx_package_t pkg = lgx_load(lgxPath.string().c_str());
+    ASSERT_NE(pkg, nullptr);
+    ASSERT_TRUE(lgx_add_variant(pkg, currentVariant().c_str(), contentDir.string().c_str(),
+                                libName.c_str()).success);
+    ASSERT_TRUE(lgx_save(pkg, lgxPath.string().c_str()).success);
+    lgx_free_package(pkg);
+
+    auto pm = createPM(SignaturePolicy::NONE);
+    std::string errorMsg;
+    EXPECT_TRUE(pm.installPluginFile(lgxPath.string(), errorMsg).empty());
+    EXPECT_NE(errorMsg.find("/manifest.json, a file name the installer reserves"), std::string::npos)
+        << errorMsg;
+}
+
+// extractLgxPackage is public and may be pointed at the same directory twice;
+// its own sidecars from the first run are not the package shipping them.
+TEST_F(SignatureTest, ExtractingTwiceIntoTheSameDirectorySucceeds) {
+    auto lgxPath = createUnsignedPackage("extract_twice");
+    ASSERT_FALSE(lgxPath.empty());
+    const fs::path out = tempDir / "extract_twice_out";
+
+    auto pm = createPM();
+    std::string errorMsg;
+    ASSERT_TRUE(pm.extractLgxPackage(lgxPath.string(), out.string(), errorMsg)) << errorMsg;
+    EXPECT_TRUE(pm.extractLgxPackage(lgxPath.string(), out.string(), errorMsg)) << errorMsg;
+}
+
+// A signature left by an earlier extraction must not describe a package that
+// carries none.
+TEST_F(SignatureTest, ReExtractingAnUnsignedPackageLeavesNoStaleSignature) {
+    auto signedPath = createUnsignedPackage("restale_signed");
+    ASSERT_FALSE(signedPath.empty());
+    auto keyPath = generateKey("restalekey");
+    ASSERT_FALSE(keyPath.empty());
+    ASSERT_TRUE(signPackage(signedPath, keyPath));
+    auto unsignedPath = createUnsignedPackage("restale_unsigned");
+    ASSERT_FALSE(unsignedPath.empty());
+    const fs::path out = tempDir / "restale_out";
+
+    auto pm = createPM();
+    std::string errorMsg;
+    ASSERT_TRUE(pm.extractLgxPackage(signedPath.string(), out.string(), errorMsg)) << errorMsg;
+    ASSERT_TRUE(fs::exists(out / currentVariant() / "manifest.sig"));
+    ASSERT_TRUE(pm.extractLgxPackage(unsignedPath.string(), out.string(), errorMsg)) << errorMsg;
+    EXPECT_FALSE(fs::exists(out / currentVariant() / "manifest.sig"));
+}
+
+// What install leaves on disk must pass the check a host runs before loading
+// it, including the `.lgpm-source` sidecar a catalog install writes.
+TEST_F(SignatureTest, TheInstalledCopyPassesTheLoadTimeIntegrityCheck) {
+    auto lgxPath = createUnsignedPackage("integrity_after_install");
+    ASSERT_FALSE(lgxPath.empty());
+
+    auto pm = createPM(SignaturePolicy::WARN);
+    std::string errorMsg;
+    std::string result = pm.installPluginFile(lgxPath.string(), errorMsg, false, nullptr, nullptr,
+                                              "https://example.org/repo");
+    ASSERT_FALSE(result.empty()) << errorMsg;
+
+    const fs::path moduleDir = fs::path(result) / "integrity_after_install";
+    ASSERT_TRUE(fs::exists(moduleDir / ".lgpm-source"));
+    std::ifstream mf(moduleDir / "manifest.json", std::ios::binary);
+    const std::string manifest((std::istreambuf_iterator<char>(mf)), std::istreambuf_iterator<char>());
+
+    EXPECT_EQ(lgx_verify_installed_tree(moduleDir.string().c_str(), manifest.data(), manifest.size(),
+                                        currentVariant().c_str()),
+              LGX_INTEGRITY_OK)
+        << lgx_get_last_error();
+}
+
 // =============================================================================
 // Install Flow: Error cases
 // =============================================================================
@@ -506,7 +616,7 @@ TEST_F(SignatureTest, InstallNonLgxFileReturnsError) {
 // =============================================================================
 
 TEST_F(SignatureTest, SkipInstallIfAlreadyInstalled) {
-    auto lgxPath = createUnsignedPackage("skip_test", "core", "2.0.0");
+    auto lgxPath = createUnsignedPackage("skip_test", "2.0.0");
     ASSERT_FALSE(lgxPath.empty());
 
     auto pm = createPM(SignaturePolicy::NONE);
@@ -524,7 +634,7 @@ TEST_F(SignatureTest, SkipInstallIfAlreadyInstalled) {
 
 TEST_F(SignatureTest, SkipInstallOlderVersion) {
     // Install v2.0.0 first
-    auto lgxPath2 = createUnsignedPackage("ver_test", "core", "2.0.0");
+    auto lgxPath2 = createUnsignedPackage("ver_test", "2.0.0");
     ASSERT_FALSE(lgxPath2.empty());
 
     auto pm = createPM(SignaturePolicy::NONE);
@@ -534,7 +644,7 @@ TEST_F(SignatureTest, SkipInstallOlderVersion) {
     ASSERT_FALSE(result1.empty()) << "First install failed: " << errorMsg;
 
     // Try to install v1.0.0 with skip flag
-    auto lgxPath1 = createUnsignedPackage("ver_test", "core", "1.0.0");
+    auto lgxPath1 = createUnsignedPackage("ver_test", "1.0.0");
     ASSERT_FALSE(lgxPath1.empty());
 
     errorMsg.clear();

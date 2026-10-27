@@ -136,6 +136,9 @@ jobs:
     secrets: inherit
     with:
       targets: cli
+      # The spec packs its example packages with lgx.
+      extra-targets: >-
+        {"lgx": {"ref": "github:logos-co/logos-package#packages.x86_64-windows.lgx"}}
       doctest-spec: doctests/lgpm-cli.test.yaml
       doctest-artifact: lgpm-doctest-reports
 

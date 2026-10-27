@@ -273,13 +273,6 @@ protected:
         std::string libName = name + "_plugin.so";
 #endif
         { std::ofstream f(contentDir / libName); f << "fake library content"; }
-        {
-            std::ofstream mf(contentDir / "manifest.json");
-            mf << "{\n  \"name\": \"" << name << "\",\n"
-               << "  \"version\": \"1.0.0\",\n"
-               << "  \"type\": \"core\",\n"
-               << "  \"category\": \"test\"\n}";
-        }
 
         lgx_result_t res = lgx_create(lgxPath.string().c_str(), name.c_str());
         if (!res.success) return {};
