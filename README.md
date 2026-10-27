@@ -83,7 +83,8 @@ pm.extractLgxPackage("/path/to/module.lgx", "/output/dir", errorMsg);
 pm.copyLibraryFromExtracted("/extracted/dir", "/target/dir",
                             /*isCoreModule=*/true, outModuleName, errorMsg);
 
-// Signature verification policy
+// Signature verification policy. Content hashes are checked under every policy:
+// a package whose files don't match its manifest never installs.
 pm.setSignaturePolicy(SignaturePolicy::WARN);     // NONE, WARN (default), REQUIRE
 pm.setKeyringDirectory("/path/to/trusted-keys");  // default: ~/.config/logos/trusted-keys/
 

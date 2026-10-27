@@ -19,6 +19,10 @@ target_include_directories(lgpm_tests PRIVATE ${LGX_ROOT}/include)
 find_library(LGX_LIB_TEST lgx PATHS ${LGX_ROOT}/lib NO_DEFAULT_PATH REQUIRED)
 target_link_libraries(lgpm_tests PRIVATE ${LGX_LIB_TEST})
 
+# The damaged-package tests rewrite an .lgx's gzip layer in-process.
+find_package(ZLIB REQUIRED)
+target_link_libraries(lgpm_tests PRIVATE ZLIB::ZLIB)
+
 # Ensure liblgx.dylib and libpackage_manager_lib are findable at runtime
 # (needed for gtest_discover_tests which runs the binary during build)
 set_target_properties(lgpm_tests PROPERTIES

@@ -8,7 +8,7 @@ pkgs.stdenv.mkDerivation {
   inherit src;
   inherit (common) nativeBuildInputs meta env;
 
-  buildInputs = common.buildInputs ++ [ pkgs.gtest ];
+  buildInputs = common.buildInputs ++ [ pkgs.gtest pkgs.zlib ];
 
   configurePhase = ''
     runHook preConfigure

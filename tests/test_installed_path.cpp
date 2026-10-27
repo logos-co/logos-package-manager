@@ -296,9 +296,10 @@ TEST_F(InstallOutParamTest, ReportsMainFileWhenPackageShipsOne) {
     EXPECT_TRUE(fs::exists(installedPath));
 }
 
-// The install succeeds and the out-param must still identify the package.
-// Before the fix this came back empty, which every caller reads as failure.
-TEST_F(InstallOutParamTest, ReportsModuleDirectoryWhenMainFileIsAbsent) {
+// A package whose declared main file is missing is invalid, and validation runs
+// under every signature policy. (The out-param's fallback to the module
+// directory is covered by InstalledPathTest.)
+TEST_F(InstallOutParamTest, AMissingMainFileIsRefusedUnderPolicyNone) {
     const std::string lib = std::string("no_main_plugin") + kLibExt;
     auto lgxPath = createPackage("no_main", lib, /*includeMainFile=*/false);
     ASSERT_FALSE(lgxPath.empty());
@@ -306,18 +307,12 @@ TEST_F(InstallOutParamTest, ReportsModuleDirectoryWhenMainFileIsAbsent) {
     auto pm = createPM();
     std::string errorMsg;
     std::string installedPath;
-    std::string result;
-    {
-        CerrCapture cap;
-        result = pm.installPluginFile(lgxPath.string(), errorMsg, false,
-                                      &installedPath, nullptr);
-    }
+    const std::string result = pm.installPluginFile(lgxPath.string(), errorMsg, false,
+                                                    &installedPath, nullptr);
 
-    ASSERT_FALSE(result.empty()) << errorMsg;
-    EXPECT_FALSE(installedPath.empty())
-        << "a successful install must never report an empty path";
-    EXPECT_EQ(installedPath, (uiPluginsDir / "no_main").string());
-    EXPECT_TRUE(fs::is_directory(installedPath));
+    EXPECT_TRUE(result.empty());
+    EXPECT_NE(errorMsg.find("Package validation failed"), std::string::npos) << errorMsg;
+    EXPECT_FALSE(fs::exists(uiPluginsDir / "no_main"));
 }
 
 // The skipIfNotNewerVersion early return used to hardcode isCoreModule=false,

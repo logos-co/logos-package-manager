@@ -79,11 +79,6 @@ protected:
                                 fs::perm_options::replace, ec);
             }
         }
-        {
-            std::ofstream mf(contentDir / "manifest.json");
-            mf << "{\"name\":\"" << name << "\",\"version\":\"" << version
-               << "\",\"type\":\"core\",\"category\":\"test\"}";
-        }
         lgx_result_t res = lgx_create(lgxPath.string().c_str(), name.c_str());
         if (!res.success) return {};
         lgx_package_t pkg = lgx_load(lgxPath.string().c_str());
@@ -296,8 +291,8 @@ TEST_F(SignerIdentityTest, ASignatureThatDoesNotVerifyReportsNoSigner) {
 // 2. THE ATTACKS. None is defended against by name; each fails because forging
 // a match needs an Ed25519 signature under a key the attacker does not have.
 
-// A1: the package plants its own manifest.sig among its payload files. It is
-// read, parsed, checked against the PINNED key, and fails.
+// A1: the package plants its own manifest.sig among its payload files. The
+// installer reserves that name, so the package never installs.
 TEST_F(SignerIdentityTest, A1_APlantedSignatureNamingThePinnedDidIsRefused) {
     ASSERT_FALSE(generateKey("victim").empty());
     const std::string victimDid = readDid("victim");
@@ -308,19 +303,15 @@ TEST_F(SignerIdentityTest, A1_APlantedSignatureNamingThePinnedDidIsRefused) {
     auto lgx = createPackage("a1naive", "1.0.0", "manifest.sig", planted.dump(2));
     ASSERT_FALSE(lgx.empty());
     std::string err;
-    ASSERT_FALSE(createPM().installPluginFile(lgx.string(), err).empty()) << err;
-
-    writeInstalled("app", {objDep("a1naive", "", victimDid)});
-    EXPECT_EQ(statusOf("app", "a1naive"), DependencyStatus::SignerMismatch);
+    EXPECT_TRUE(createPM().installPluginFile(lgx.string(), err).empty());
+    EXPECT_NE(err.find("a file name the installer reserves"), std::string::npos) << err;
 }
 
 // Replay, not forgery: a GENUINE signature by the pinned publisher, over some
-// other package of theirs. manifest.json carries the Merkle root over the
-// payload, so a signature can only ever describe the package it was made for.
+// other package of theirs, planted the same way.
 TEST_F(SignerIdentityTest, A1_AGenuineSignatureOverOtherBytesIsRefused) {
     auto key = generateKey("victim");
     ASSERT_FALSE(key.empty());
-    const std::string victimDid = readDid("victim");
 
     auto real = createPackage("other");
     ASSERT_FALSE(real.empty());
@@ -331,10 +322,8 @@ TEST_F(SignerIdentityTest, A1_AGenuineSignatureOverOtherBytesIsRefused) {
     auto lgx = createPackage("a1replay", "1.0.0", "manifest.sig", genuine);
     ASSERT_FALSE(lgx.empty());
     std::string err;
-    ASSERT_FALSE(createPM().installPluginFile(lgx.string(), err).empty()) << err;
-
-    writeInstalled("app", {objDep("a1replay", "", victimDid)});
-    EXPECT_EQ(statusOf("app", "a1replay"), DependencyStatus::SignerMismatch);
+    EXPECT_TRUE(createPM().installPluginFile(lgx.string(), err).empty());
+    EXPECT_NE(err.find("a file name the installer reserves"), std::string::npos) << err;
 }
 
 // A2: the record does NOT outlive the package it described. The install swaps
@@ -382,10 +371,8 @@ TEST_F(SignerIdentityTest, A2_AnUnsignedReinstallLeavesNoSignatureBehind) {
     EXPECT_EQ(dep->status, DependencyStatus::SignerMismatch);
 }
 
-// A3: the plant is read-only, which out of the Nix store is ordinary. A
-// non-event here because the signature is written during EXTRACTION, and
-// Package::extractVariant re-adds owner_write to every file it writes — and a
-// surviving plant would still have to verify.
+// A3: the plant is read-only, which out of the Nix store is ordinary. Refused
+// for its name, before its permissions matter.
 TEST_F(SignerIdentityTest, A3_AReadOnlyPlantedSignatureIsRefused) {
     ASSERT_FALSE(generateKey("victim").empty());
     const std::string victimDid = readDid("victim");
@@ -403,10 +390,8 @@ TEST_F(SignerIdentityTest, A3_AReadOnlyPlantedSignatureIsRefused) {
     ASSERT_TRUE(signPackage(lgx, akey));
 
     std::string err;
-    ASSERT_FALSE(createPM().installPluginFile(lgx.string(), err).empty()) << err;
-
-    writeInstalled("app", {objDep("a3", "", victimDid)});
-    EXPECT_EQ(statusOf("app", "a3"), DependencyStatus::SignerMismatch);
+    EXPECT_TRUE(createPM().installPluginFile(lgx.string(), err).empty());
+    EXPECT_NE(err.find("a file name the installer reserves"), std::string::npos) << err;
 }
 
 // SWAP: the installed document is self-consistent — attacker's DID, attacker's

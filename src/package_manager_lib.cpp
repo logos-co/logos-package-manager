@@ -150,6 +150,28 @@ static std::string joinStrings(const std::vector<std::string>& items, const char
     return out;
 }
 
+// The check a host runs on an installed directory before loading it, run on
+// the staged copy: an install that would fail it at launch fails here instead.
+static bool verifyStagedTree(const fs::path& variantDir, std::string& errorMsg) {
+    std::ifstream mf(variantDir / "manifest.json", std::ios::binary);
+    const std::string manifest((std::istreambuf_iterator<char>(mf)),
+                               std::istreambuf_iterator<char>());
+    if (!mf.good() && !mf.eof()) {
+        errorMsg = "Failed to read the extracted manifest.json in " + variantDir.string();
+        return false;
+    }
+    const std::string variant = variantDir.filename().string();
+    const lgx_integrity_t integrity = lgx_verify_installed_tree(
+        variantDir.string().c_str(), manifest.data(), manifest.size(), variant.c_str());
+    if (integrity != LGX_INTEGRITY_OK) {
+        const char* why = lgx_get_last_error();
+        errorMsg = std::string("Extracted package failed its integrity check: ")
+                 + (why && *why ? why : "unknown error");
+        return false;
+    }
+    return true;
+}
+
 const char* installTypeToString(InstallType t) {
     switch (t) {
         case InstallType::Embedded: return "embedded";
@@ -342,6 +364,16 @@ std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, 
         }
     }
 
+    // ── Integrity: are these the files the manifest describes? ──────────────
+    //
+    // Not a trust question, so no signature policy turns it off: a package
+    // whose content doesn't match its own hashes is damaged, signed or not.
+    const SignatureVerificationResult sigResult = verifyPackageSignature(pluginPath);
+    if (!sigResult.package_valid) {
+        errorMsg = "Package validation failed: " + (sigResult.error.empty() ? "unknown error" : sigResult.error);
+        return {};
+    }
+
     // ── The trust-anchor gate: may this package be installed at all? ────────
     //
     // This is AUTHORIZATION, and the ACTIVE ANCHOR SET is the only thing that
@@ -361,14 +393,8 @@ std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, 
     // resolveDependencies in this file — never here.
     // Both checks are needed; neither substitutes for the other.
     if (m_signaturePolicy != SignaturePolicy::NONE) {
-        auto sigResult = verifyPackageSignature(pluginPath);
-
         if (sigResult.is_signed && !sigResult.signature_valid) {
             errorMsg = "Invalid signature: " + (sigResult.error.empty() ? "unknown error" : sigResult.error);
-            return {};
-        }
-        if (!sigResult.package_valid) {
-            errorMsg = "Package validation failed: " + (sigResult.error.empty() ? "unknown error" : sigResult.error);
             return {};
         }
         if (!sigResult.is_signed && m_signaturePolicy == SignaturePolicy::REQUIRE) {
@@ -451,6 +477,10 @@ std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, 
         }
     }
 
+    if (!variantDir.empty() && !verifyStagedTree(variantDir, errorMsg)) {
+        removeTreeQuietly(tempDir);
+        return {};
+    }
 
     // Determine module type from manifest.json "type" field
     std::string detectedType;
@@ -1574,6 +1604,19 @@ bool PackageManagerLib::extractLgxPackage(const std::string& lgxPath, const std:
         return false;
     }
 
+    // The installer writes these beside the payload, and logos-package's
+    // installed-tree check skips them (INSTALL_SIDECAR_FILES). A payload file
+    // of the same name would be overwritten, and the install could never pass
+    // that check. Any left by an earlier extraction here are cleared first, so
+    // what is found afterwards came from this package.
+    static constexpr const char* kInstallerFiles[] = {
+        "manifest.json", "manifest.sig", "variant", ".lgpm-source"};
+    const fs::path variantOutputDir = fs::path(outputDir) / matchedVariant;
+    for (const char* name : kInstallerFiles) {
+        std::error_code rmEc;
+        fs::remove(variantOutputDir / name, rmEc);
+    }
+
     lgx_result_t result = lgx_extract(pkg, matchedVariant.c_str(), outputDir.c_str());
 
     if (!result.success) {
@@ -1582,8 +1625,16 @@ bool PackageManagerLib::extractLgxPackage(const std::string& lgxPath, const std:
         return false;
     }
 
+    for (const char* reserved : kInstallerFiles) {
+        if (fs::exists(variantOutputDir / reserved)) {
+            errorMsg = std::string("Package ships variants/") + matchedVariant + "/" + reserved
+                     + ", a file name the installer reserves";
+            lgx_free_package(pkg);
+            return false;
+        }
+    }
+
     // Write the full root manifest.json from the LGX package into the extracted variant directory
-    fs::path variantOutputDir = fs::path(outputDir) / matchedVariant;
     fs::path manifestPath = variantOutputDir / "manifest.json";
 
     const char* manifestJson = lgx_get_manifest_json(pkg);
@@ -1619,10 +1670,6 @@ bool PackageManagerLib::extractLgxPackage(const std::string& lgxPath, const std:
     // to what the signature covers and a detached check stays meaningful long
     // after the .lgx is deleted. A package that ships no signature leaves
     // nothing here and reads as "nobody knows", exactly as before.
-    //
-    // Written BEFORE the payload copy deliberately: Package::extractVariant
-    // re-adds owner_write to every file it writes, so a package shipping its
-    // own read-only variants/<v>/manifest.sig cannot block the real one.
     if (const char* sigJson = lgx_get_manifest_sig_json(pkg)) {
         fs::path sigPath = variantOutputDir / "manifest.sig";
         std::ofstream sf(sigPath, std::ios::binary | std::ios::trunc);
