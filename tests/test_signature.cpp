@@ -789,6 +789,31 @@ TEST_F(SignatureTest, InstallVariantMismatchFailsAndLogs) {
     EXPECT_NE(logged.find(lgxPath.string()), std::string::npos) << logged;
 }
 
+// A dev build refusing a portable-only package names the build, not the
+// package, and the package's own spelling of this machine (logos-basecamp#328).
+TEST_F(SignatureTest, DevBuildNamesItselfForPortableOnlyPackage) {
+    if (currentVariant().size() < 4 || currentVariant().compare(currentVariant().size() - 4, 4, "-dev") != 0)
+        GTEST_SKIP() << "portable build: it installs portable variants";
+
+    const std::string previous = PackageManagerLib::platformVariantOverride();
+    PackageManagerLib::setPlatformVariantOverride("linux-x86_64");
+    auto lgxPath = createPackageWithVariant("portable_only_pkg", "linux-amd64");
+    std::string errorMsg;
+    std::string result;
+    {
+        CerrCapture cap;
+        result = createPM(SignaturePolicy::NONE).installPluginFile(lgxPath.string(), errorMsg);
+    }
+    PackageManagerLib::setPlatformVariantOverride(previous);
+
+    ASSERT_FALSE(lgxPath.empty());
+    EXPECT_TRUE(result.empty());
+    EXPECT_NE(errorMsg.find("dev build"), std::string::npos) << errorMsg;
+    EXPECT_NE(errorMsg.find("'linux-amd64'"), std::string::npos) << errorMsg;
+    EXPECT_NE(errorMsg.find("#portable-builds"), std::string::npos) << errorMsg;
+    EXPECT_EQ(errorMsg.find("does not contain"), std::string::npos) << errorMsg;
+}
+
 // =============================================================================
 // The trust-anchor gate: what the three policy levels SAY, not just what they
 // decide.
