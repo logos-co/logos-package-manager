@@ -1605,6 +1605,19 @@ bool PackageManagerLib::extractLgxPackage(const std::string& lgxPath, const std:
                   << availableList << "].\n";
         errorMsg = "Package does not contain variant for platform: " + variants.front()
                  + " (package provides: " + availableList + ")";
+#ifndef LGPM_PORTABLE_BUILD
+        // The package is fine: this dev build accepts only "-dev" variants, and
+        // published packages carry portable ones (logos-basecamp#328).
+        for (const auto& v : variants) {
+            const std::string portable = v.substr(0, v.size() - 4);
+            if (lgx_has_variant(pkg, portable.c_str())) {
+                errorMsg = "This is a dev build, which installs only '-dev' variants; the package "
+                           "has the portable variant '" + portable + "'. Use a portable build: "
+                           "https://github.com/logos-co/logos-basecamp/#portable-builds";
+                break;
+            }
+        }
+#endif
         lgx_free_package(pkg);
         return false;
     }
